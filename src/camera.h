@@ -34,6 +34,10 @@ struct CameraParams {
     bool need_reorder;
     bool lens_control; // run IrisInit/FocusInit on open so an EF/RF lens is controllable
     unsigned int line_time; // ns per sensor row; 0 = leave the camera's current value
+    // GPO line that gives one exposure pulse per ZeroMQ sync request
+    // (sync_pulse.h); -1 = none. At most one camera sets it.
+    int sync_pulse_gpo = -1;
+    std::string sync_pulse_endpoint = "tcp://*:5560"; // ZeroMQ REP bind address
     unsigned int gain_max;
     unsigned int gain_min;
     unsigned int gain_inc;

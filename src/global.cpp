@@ -5,6 +5,7 @@ std::atomic<double> streaming_fps = 0.0;
 std::atomic<int> streaming_target_fps = 20;
 std::atomic<int64_t> record_start_time_ns{0};
 std::atomic<int> g_cam_ptp_offset[kMaxCameras] = {};
+std::mutex g_cam_gvcp_mutex[kMaxCameras];
 std::atomic<float> g_cam_brightness[kMaxCameras] = {};
 
 double recording_elapsed_seconds() {

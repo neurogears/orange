@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 
 using json = nlohmann::json;
 
@@ -126,11 +127,13 @@ struct PTPState {
 
 void report_statistics(CameraParams *camera_params, CameraState *camera_state,
                        double time_diff);
-void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam);
+void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam,
+                     std::mutex &gvcp_mutex);
 void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
                     CameraParams *camera_params, CameraEmergent *ecam,
                     unsigned int delay_in_second);
-void grab_frames_after_countdown(PTPState *ptp_state, CameraEmergent *ecam);
+void grab_frames_after_countdown(PTPState *ptp_state, CameraEmergent *ecam,
+                                 std::mutex &gvcp_mutex);
 bool try_start_timer();
 bool try_stop_timer();
 void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,

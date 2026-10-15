@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 extern std::atomic<double> streaming_fps;
 extern std::atomic<int> streaming_target_fps;
@@ -14,6 +15,12 @@ extern std::atomic<int64_t> record_start_time_ns;
 // on the same camera collides (GVCP ACK error 0300) and crashes the EVT SDK.
 constexpr int kMaxCameras = 20;
 extern std::atomic<int> g_cam_ptp_offset[kMaxCameras];
+
+// One lock per camera (indexed by CameraParams::camera_id) for threads that
+// must issue GVCP to a camera the capture thread is also talking to: the
+// capture thread holds it around its per-frame GVCP, the sync-pulse server
+// (sync_pulse.h) around each GPO mode switch.
+extern std::mutex g_cam_gvcp_mutex[kMaxCameras];
 
 // Latest average frame brightness (mono8 mean, 0-255) per camera, published by
 // each camera's encoder thread via a throttled, subsampled GPU reduction (see

@@ -4,6 +4,7 @@
 #include "global.h"
 #include "gpu_video_encoder.h"
 #include "opengldisplay.h"
+#include "sync_pulse_evt.h"
 #include "utils.h"
 
 void load_camera_json_config_files(std::string file_name,
@@ -55,6 +56,13 @@ void load_camera_json_config_files(std::string file_name,
         camera_params->line_time = camera_config["line_time"];
     } else {
         camera_params->line_time = 0;
+    }
+    if (camera_config.contains("sync_pulse_gpo")) {
+        camera_params->sync_pulse_gpo = camera_config["sync_pulse_gpo"];
+    }
+    if (camera_config.contains("sync_pulse_endpoint")) {
+        camera_params->sync_pulse_endpoint =
+            camera_config["sync_pulse_endpoint"];
     }
 }
 
@@ -122,11 +130,15 @@ void report_statistics(CameraParams *camera_params, CameraState *camera_state,
     std::cout << print_out << std::endl;
 }
 
-void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam) {
+void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam,
+                     std::mutex &gvcp_mutex) {
     // Show raw offsets.
     for (unsigned int i = 0; i < 5;) {
-        EVT_CameraGetInt32Param(&ecam->camera, "PtpOffset",
-                                &ptp_state->ptp_offset);
+        {
+            std::lock_guard<std::mutex> lk(gvcp_mutex);
+            EVT_CameraGetInt32Param(&ecam->camera, "PtpOffset",
+                                    &ptp_state->ptp_offset);
+        }
         if (ptp_state->ptp_offset != ptp_state->ptp_offset_prev) {
             ptp_state->ptp_offset_sum += ptp_state->ptp_offset;
             i++;
@@ -143,7 +155,9 @@ void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
     // Local multi-camera barrier: the last camera to arrive latches the
     // current PTP time and broadcasts a common gate time; all cameras then
     // wait until every camera has programmed the gate before proceeding.
+    std::mutex &gvcp_mutex = g_cam_gvcp_mutex[camera_params->camera_id];
     if (ptp_params->ptp_counter == camera_params->num_cameras - 1) {
+        std::lock_guard<std::mutex> lk(gvcp_mutex);
         ptp_state->ptp_time = get_current_PTP_time(&ecam->camera);
         ptp_params->ptp_global_time =
             ((unsigned long long)delay_in_second) * 1000000000 +
@@ -161,25 +175,36 @@ void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
         (unsigned int)(ptp_time_plus_delta_to_start & 0xFFFFFFFF);
     ptp_state->ptp_time_plus_delta_to_start_high =
         (unsigned int)(ptp_time_plus_delta_to_start >> 32);
-    EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeHigh",
-                             ptp_state->ptp_time_plus_delta_to_start_high);
-    EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeLow",
-                             ptp_state->ptp_time_plus_delta_to_start_low);
+    {
+        std::lock_guard<std::mutex> lk(gvcp_mutex);
+        EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeHigh",
+                                 ptp_state->ptp_time_plus_delta_to_start_high);
+        EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeLow",
+                                 ptp_state->ptp_time_plus_delta_to_start_low);
+    }
     ptp_state->ptp_time_plus_delta_to_start_uint = ptp_time_plus_delta_to_start;
     ptp_state->ptp_time_plus_delta_to_start = ptp_params->ptp_global_time;
     printf("PTP Gate time(ns): %llu\n", ptp_time_plus_delta_to_start);
 }
 
-void grab_frames_after_countdown(PTPState *ptp_state, CameraEmergent *ecam) {
+void grab_frames_after_countdown(PTPState *ptp_state, CameraEmergent *ecam,
+                                 std::mutex &gvcp_mutex) {
     printf("Grabbing Frames after countdown...\n");
     ptp_state->ptp_time_countdown = 0;
     // Countdown code
     do {
-        EVT_CameraExecuteCommand(&ecam->camera, "GevTimestampControlLatch");
-        EVT_CameraGetUInt32Param(&ecam->camera, "GevTimestampValueHigh",
-                                 &ptp_state->ptp_time_high);
-        EVT_CameraGetUInt32Param(&ecam->camera, "GevTimestampValueLow",
-                                 &ptp_state->ptp_time_low);
+        {
+            std::lock_guard<std::mutex> lk(gvcp_mutex);
+            EVT_CameraExecuteCommand(&ecam->camera, "GevTimestampControlLatch");
+            EVT_CameraGetUInt32Param(&ecam->camera, "GevTimestampValueHigh",
+                                     &ptp_state->ptp_time_high);
+            EVT_CameraGetUInt32Param(&ecam->camera, "GevTimestampValueLow",
+                                     &ptp_state->ptp_time_low);
+        }
+        // Let the sync-pulse server waiting on this camera's GVCP lock in;
+        // std::mutex is not fair. Leaving the countdown up to 0.2 ms late
+        // only queues the first frames in the frame ring.
+        usleep(200);
         ptp_state->ptp_time =
             (((unsigned long long)(ptp_state->ptp_time_high)) << 32) |
             ((unsigned long long)(ptp_state->ptp_time_low));
@@ -230,9 +255,13 @@ inline void get_one_frame(CameraState *camera_state,
                           CameraControl *camera_control, CameraEmergent *ecam,
                           CameraParams *camera_params, PTPState *ptp_state,
                           void *openGLDisplay, GPUVideoEncoder *gpu_encoder,
-                          FrameSaver *frame_saver) {
+                          FrameSaver *frame_saver, bool sync_pulse) {
+    // GVCP below runs under this camera's lock: the sync-pulse server may be
+    // switching this camera's GPO line (sync_pulse.h).
+    std::mutex &gvcp_mutex = g_cam_gvcp_mutex[camera_params->camera_id];
     if (camera_control->trigger_mode) {
         std::cout << "trigger" << std::endl;
+        std::lock_guard<std::mutex> lk(gvcp_mutex);
         check_camera_errors(
             EVT_CameraExecuteCommand(&ecam->camera, "TriggerSoftware"),
             camera_params->camera_serial.c_str());
@@ -241,6 +270,7 @@ inline void get_one_frame(CameraState *camera_state,
     camera_state->camera_return =
         EVT_CameraGetFrame(&ecam->camera, &ecam->frame_recv, EVT_INFINITE);
 
+    std::unique_lock<std::mutex> gvcp_lock(gvcp_mutex);
     int ptp_offset = 0;
     EVT_CameraGetInt32Param(&ecam->camera, "PtpOffset", &ptp_offset);
     // Publish for the PTP-logging worker so it never issues its own (colliding)
@@ -257,6 +287,7 @@ inline void get_one_frame(CameraState *camera_state,
     if (camera_control->sync_camera) {
         PTP_timestamp_checking(ptp_state, ecam, camera_state);
     }
+    gvcp_lock.unlock();
 
     if (!camera_state->camera_return) {
         // Counting dropped frames through frame_id as redundant check.
@@ -303,6 +334,11 @@ inline void get_one_frame(CameraState *camera_state,
             State_Copy_New_Frame) {
             frame_saver->notify_frame_ready(ecam->frame_recv.imagePtr);
         }
+
+        // frame_id as written to Cam<serial>_meta.csv.
+        if (sync_pulse)
+            g_sync_pulse.OnFrame(ecam->frame_recv.timestamp,
+                                 camera_state->frame_count);
 
         camera_state->frame_count++;
 
@@ -375,17 +411,46 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
     bool use_ptp_gate =
         camera_control->sync_camera && camera_params->num_cameras > 1;
 
+    std::mutex &gvcp_mutex = g_cam_gvcp_mutex[camera_params->camera_id];
     if (use_ptp_gate) {
-        show_ptp_offset(&ptp_state, ecam);
+        show_ptp_offset(&ptp_state, ecam, gvcp_mutex);
         start_ptp_sync(&ptp_state, ptp_params, camera_params, ecam, 3);
     }
 
-    check_camera_errors(
-        EVT_CameraExecuteCommand(&ecam->camera, "AcquisitionStart"),
-        camera_params->camera_serial.c_str());
+    // The sync-pulse camera takes over its GPO line while it streams, so the
+    // ZeroMQ server can let single exposures through to it (sync_pulse.h).
+    bool sync_pulse = false;
+    if (camera_params->sync_pulse_gpo >= 0 && g_sync_pulse.ServerRunning()) {
+        SyncPulseConfig cfg;
+        cfg.camera_serial = camera_params->camera_serial;
+        cfg.gpo_line = camera_params->sync_pulse_gpo;
+        cfg.exposure_ns = double(camera_params->exposure) * 1e3;
+        cfg.period_ns = camera_params->frame_rate > 0
+                            ? 1e9 / double(camera_params->frame_rate)
+                            : 0.0;
+        cfg.gvcp_mutex = &gvcp_mutex;
+        if (camera_control->record_video && !folder_name.empty())
+            cfg.log_path = folder_name + "/sync_pulses_Cam" +
+                           camera_params->camera_serial + "_gpo" +
+                           std::to_string(camera_params->sync_pulse_gpo) +
+                           ".csv";
+        sync_pulse = g_sync_pulse.Attach(
+            std::make_unique<EvtSyncPulseCamera>(&ecam->camera,
+                                                 cfg.gpo_line),
+            cfg);
+        if (sync_pulse && !cfg.log_path.empty())
+            chown_to_invoking_user(cfg.log_path);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(gvcp_mutex);
+        check_camera_errors(
+            EVT_CameraExecuteCommand(&ecam->camera, "AcquisitionStart"),
+            camera_params->camera_serial.c_str());
+    }
 
     if (use_ptp_gate) {
-        grab_frames_after_countdown(&ptp_state, ecam);
+        grab_frames_after_countdown(&ptp_state, ecam, gvcp_mutex);
         // Countdown done.
     }
     // Start the recording timer regardless of the gate (recording always sets
@@ -403,12 +468,17 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
     while (camera_control->subscribe) {
         get_one_frame(&camera_state, camera_select, camera_control, ecam,
                       camera_params, &ptp_state, openGLDisplay, gpu_encoder,
-                      &frame_saver);
+                      &frame_saver, sync_pulse);
     }
 
-    check_camera_errors(
-        EVT_CameraExecuteCommand(&ecam->camera, "AcquisitionStop"),
-        camera_params->camera_serial.c_str());
+    {
+        std::lock_guard<std::mutex> lk(gvcp_mutex);
+        check_camera_errors(
+            EVT_CameraExecuteCommand(&ecam->camera, "AcquisitionStop"),
+            camera_params->camera_serial.c_str());
+    }
+    if (sync_pulse)
+        g_sync_pulse.Detach();
     try_stop_timer();
     double time_diff = w.Stop();
 

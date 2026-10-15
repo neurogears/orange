@@ -71,6 +71,8 @@ add_executable(orange
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLFW3 REQUIRED glfw3)
+# ZeroMQ for the sync-pulse server (src/sync_pulse.h): apt install libzmq3-dev
+pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
 target_include_directories(orange PRIVATE
     ${DIR_IMGUI} ${DIR_IMGUI_BACKEND} ${DIR_IMPLOT} ${DIR_FILEBROWSER} ${DIR_ICONFONT}
     ${GLFW3_INCLUDE_DIRS}
@@ -82,6 +84,7 @@ target_link_libraries(orange
     avformat swscale swresample avutil avcodec
     # NVTX3 (nvtx3/nvToolsExt.h) is header-only on CUDA 12.x and 13 — no nvToolsExt link.
     ${GLFW3_LIBRARIES}
+    PkgConfig::ZMQ
 )
 
 # Emit DT_RPATH instead of DT_RUNPATH: transitively-needed bundled FFmpeg libs

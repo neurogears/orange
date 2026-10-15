@@ -113,7 +113,11 @@ void stop_camera_streaming(std::vector<std::thread> &camera_threads,
 
     camera_threads.clear();
 
+    // The capture threads are gone; take each camera's GVCP lock anyway, as
+    // every other thread that talks to a camera does (global.h).
     for (int i = 0; i < num_cameras; i++) {
+        std::lock_guard<std::mutex> lk(
+            g_cam_gvcp_mutex[cameras_params[i].camera_id]);
         destroy_frame_buffer(&ecams[i].camera, ecams[i].evt_frame,
                              evt_buffer_size, cameras_params);
         delete[] ecams[i].evt_frame;
@@ -127,6 +131,8 @@ void stop_camera_streaming(std::vector<std::thread> &camera_threads,
     // camera case left ptp_counter stale, which hung the start barrier on a
     // second record (stream never re-opened, then a crash on stop).
     for (int i = 0; i < num_cameras; i++) {
+        std::lock_guard<std::mutex> lk(
+            g_cam_gvcp_mutex[cameras_params[i].camera_id]);
         ptp_sync_off(&ecams[i].camera, cameras_params);
     }
     ptp_params->ptp_counter = 0;

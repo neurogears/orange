@@ -1,6 +1,7 @@
 #include "camera.h"
 #include "global.h"
 #include "gui.h"
+#include "sync_pulse.h"
 #include "imgui.h"
 #include "implot.h"
 #include "utils.h"
@@ -429,6 +430,16 @@ int main(int argc, char **args) {
                 ImGui::EndDisabled();
             }
 
+            if (g_sync_pulse.ServerRunning()) {
+                ImGui::Text("Sync pulse: %s, %s, %llu pulses",
+                            g_sync_pulse.Endpoint().c_str(),
+                            g_sync_pulse.Attached() ? "armed" : "not streaming",
+                            (unsigned long long)g_sync_pulse.PulseCount());
+                std::string last = g_sync_pulse.LastReply();
+                if (!last.empty())
+                    ImGui::TextWrapped("Last reply: %s", last.c_str());
+            }
+
             if (camera_control->open) {
                 if (camera_control->subscribe) {
                     ImGui::BeginDisabled();
@@ -810,6 +821,16 @@ int main(int argc, char **args) {
                                     &cameras_params[i]);
                             }
                         }
+                        // ZeroMQ sync-pulse server, if a camera config sets
+                        // "sync_pulse_gpo" (sync_pulse.h). That camera's
+                        // capture thread attaches to it while streaming.
+                        for (int i = 0; i < num_cameras; i++) {
+                            if (cameras_params[i].sync_pulse_gpo < 0)
+                                continue;
+                            g_sync_pulse.StartServer(
+                                cameras_params[i].sync_pulse_endpoint);
+                            break;
+                        }
                         realtime_plot_data = new ScrollingBuffer[num_cameras];
                         brightness_plot_data = new ScrollingBuffer[num_cameras];
                         // Hold the whole recording at the GUI sample rate
@@ -819,6 +840,7 @@ int main(int argc, char **args) {
                     }
                 } else {
                     camera_control->open = false;
+                    g_sync_pulse.StopServer();
                     for (int i = 0; i < num_cameras; i++) {
                         close_camera(&ecams[i].camera, &cameras_params[i]);
                     }
@@ -1175,7 +1197,12 @@ int main(int argc, char **args) {
                 static float t = 0;
                 t += ImGui::GetIO().DeltaTime;
                 for (int i = 0; i < num_cameras; i++) {
-                    get_senstemp_value(&ecams[i].camera, &cameras_params[i]);
+                    {
+                        std::lock_guard<std::mutex> lk(
+                            g_cam_gvcp_mutex[cameras_params[i].camera_id]);
+                        get_senstemp_value(&ecams[i].camera,
+                                           &cameras_params[i]);
+                    }
                     realtime_plot_data[i].AddPoint(t,
                                                    cameras_params[i].sens_temp);
                 }
@@ -1322,6 +1349,8 @@ int main(int argc, char **args) {
                               cameras_params, cameras_select, num_cameras,
                               evt_buffer_size, ptp_params);
     }
+
+    g_sync_pulse.StopServer();
 
     if (camera_control->open) {
         for (int i = 0; i < num_cameras; i++) {
