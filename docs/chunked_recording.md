@@ -101,8 +101,11 @@ showed up only as `frame_id` gaps.
 | 100 s, 30 s chunks (time-based cut) | 4 | 6001 | 0 | 0 | all cameras cut on the same frame_id (1800, 3600, 5400), start spread 25 ns |
 | 20 min, 30 s chunks (time-based cut) | 41 | 72002 | 0 | 0 | 40 × 1800 frames on every camera, start spread 14–29 ns, encoder queue 0 at all 320 rollovers, file open ≤ 0.5 ms |
 | 10 min, 30 s chunks (sync-frame cut, current) | 21 | 36002 | 0 | 0 | 20 × 1800 frames on every camera, start spread 22–28 ns |
+| 12 h, 30 min chunks (sync-frame cut, current) | 25 | 2592055 | 0 | 0 | 24 × 108000 frames on every camera (+55-frame tail), start spread 11–29 ns, file close ≤ 6.6 ms |
 
-All three runs pass `tools/check_chunks.py`: frame continuity across every boundary (each boundary exactly one period), mp4 packets = csv rows, and each file starts on a decodable keyframe. Not yet tested: a multi-hour run with production-length (30 min) chunks.
+All four runs pass `tools/check_chunks.py`: frame continuity across every boundary (each boundary exactly one period), mp4 packets = csv rows, and each file starts on a decodable keyframe.
+
+During the 12 h run (2026-10-14 18:36 to 2026-10-15 06:37), dirty page-cache memory, sampled every 10 s, peaked at 2.4 GB, and MemAvailable never fell below 478 GB. The recording took 2.9 TB (~241 GB/h).
 
 ## Still to watch
 
@@ -110,7 +113,8 @@ All three runs pass `tools/check_chunks.py`: frame continuity across every bound
   that lined up with kernel dirty-page flushes on another machine. He fixed
   them with `sync_file_range` pacing in the writer plus
   `vm.dirty_background_bytes` / `vm.dirty_bytes`. This box has 503 GB of RAM
-  and the default 10 % / 20 % dirty ratios. Chunking does not change the write
-  pattern, but a multi-day run is where a writeback stall would show up.
-- **Disk space.** At these settings 8 cameras write ~4.4 GB/min (~265 GB/h),
-  so the 27 TB `/mnt/data` array holds ~4 days.
+  and the default 10 % / 20 % dirty ratios. In the 12 h run, dirty pages never
+  exceeded 2.4 GB and nothing stalled. Only a multi-day run, or a run with
+  other heavy disk I/O alongside it, would test this further.
+- **Disk space.** At these settings 8 cameras write ~4 GB/min (~241 GB/h measured over 12 h),
+  so the 27 TB `/mnt/data` array holds ~4.5 days.
