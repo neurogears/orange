@@ -832,13 +832,24 @@ int main(int argc, char **args) {
                             }
                         }
                         // ZeroMQ sync-pulse server, if a camera config sets
-                        // "sync_pulse_gpo" (sync_pulse.h). That camera's
-                        // capture thread attaches to it while streaming.
+                        // "sync_pulse_gpo" and "sync_pulse_gate_gpo"
+                        // (sync_pulse.h). That camera's capture thread
+                        // attaches to it while streaming.
                         for (int i = 0; i < num_cameras; i++) {
-                            if (cameras_params[i].sync_pulse_gpo < 0)
+                            const CameraParams &cp = cameras_params[i];
+                            if (cp.sync_pulse_gpo < 0)
                                 continue;
-                            g_sync_pulse.StartServer(
-                                cameras_params[i].sync_pulse_endpoint);
+                            if (cp.sync_pulse_gate_gpo < 0 ||
+                                cp.sync_pulse_gate_gpo == cp.sync_pulse_gpo) {
+                                printf("[sync_pulse] Cam%s sets sync_pulse_gpo "
+                                       "but no separate sync_pulse_gate_gpo: "
+                                       "sync pulses need a second GPO line as "
+                                       "a gate (docs/zmq_sync.md); no sync "
+                                       "pulses\n",
+                                       cp.camera_serial.c_str());
+                                break;
+                            }
+                            g_sync_pulse.StartServer(cp.sync_pulse_endpoint);
                             break;
                         }
                         realtime_plot_data = new ScrollingBuffer[num_cameras];

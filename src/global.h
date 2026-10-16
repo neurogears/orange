@@ -19,7 +19,7 @@ extern std::atomic<int> g_cam_ptp_offset[kMaxCameras];
 // One lock per camera (indexed by CameraParams::camera_id) for threads that
 // must issue GVCP to a camera the capture thread is also talking to: the
 // capture thread holds it around its per-frame GVCP, the sync-pulse server
-// (sync_pulse.h) around each GPO mode switch.
+// (sync_pulse.h) around each gate write.
 extern std::mutex g_cam_gvcp_mutex[kMaxCameras];
 
 // Latest average frame brightness (mono8 mean, 0-255) per camera, published by

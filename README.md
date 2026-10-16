@@ -52,7 +52,7 @@ Presets are folders under `~/orange_data/config/local/<preset>/`, one `<serial>.
 | `pga_gain` | sensor PGA gain (`PGAGain`); left as is when absent |
 | `line_time` | sensor line time in ns (`LineTime`); left as is when absent |
 | `offsetx`, `offsety`, `lens_control`, `gop` | ROI offset, EF/RF lens init, GOP length in s |
-| `sync_pulse_gpo`, `sync_pulse_endpoint` | ZeroMQ sync pulses, see below |
+| `sync_pulse_gpo`, `sync_pulse_gate_gpo`, `sync_pulse_timestamp_marks`, `sync_pulse_endpoint` | ZeroMQ sync pulses, see below |
 | `encoder` | per-camera NVENC settings, below |
 
 `encoder` overrides the GUI's preset for that camera and adds rate control options. The codec stays global (GUI or `~/.config/orange/config.json`). For example:
@@ -89,9 +89,9 @@ orange --preset <config/local folder> --chunk-seconds 1800 \
 
 ## Sync pulses on request (ZeroMQ)
 
-To align orange with another acquisition system, e.g. Bonsai + a Harp Behavior board on a different PC, add `"sync_pulse_gpo": <line>` to one camera's json in the preset. orange then answers ZeroMQ requests on `tcp://*:5560`. For each `pulse` request it lets exactly one exposure of that camera through to the GPO line and replies (JSON) with that frame's PTP timestamp and `frame_id`, the same values as in `Cam<serial>_meta.csv`. The edge comes from the camera's own exposure output, and the timestamp is the camera's own frame timestamp, so nothing is estimated from network timing. The other system logs the pulse in Harp time, which gives one PTP ↔ Harp pair per request. Protocol, setup and tests are in [docs/zmq_sync.md](docs/zmq_sync.md); `tools/sync_pulse_client.py` sends requests from the command line.
+To align orange with another acquisition system, e.g. Bonsai + a Harp Behavior board on a different PC, wire two of one camera's GPO lines to the Harp side, through an AND gate or to two Harp inputs, and add `"sync_pulse_gpo": <exposure line>` and `"sync_pulse_gate_gpo": <gate line>` to that camera's json in the preset. While it streams, the exposure line pulses on every exposure and the gate line stays closed; neither line's mode changes. orange answers ZeroMQ requests on `tcp://*:5560`. For each `pulse` request it opens the gate around exactly one exposure and replies (JSON) with that frame's PTP timestamp and `frame_id`, the same values as in `Cam<serial>_meta.csv`. The edge comes from the camera's own exposure output, and the timestamp is the camera's own frame timestamp, so nothing is estimated from network timing. The other system logs the pulse in Harp time, which gives one PTP ↔ Harp pair per request. A `probe` request finds out once whether the camera's timestamps mark exposure start or end, which `sync_pulse_timestamp_marks` then records. Protocol, wiring, setup and tests are in [docs/zmq_sync.md](docs/zmq_sync.md); `tools/sync_pulse_client.py` sends requests from the command line.
 
-**Known problem:** on the rig's HB cameras each pulse currently costs the sync camera two frames (the camera restarts a frame when its GPO line's mode is switched mid-stream), so its frame count falls behind the other cameras'. Details and evidence are in [docs/zmq_sync.md](docs/zmq_sync.md#hardware-result-each-pulse-costs-the-sync-camera-two-frames); the fix is on branch `ng-dev/sync-gate`.
+An earlier version switched a single line's mode for each pulse, which cost the sync camera two frames per pulse on the rig's HB cameras ([details](docs/zmq_sync.md#first-version-each-pulse-cost-the-sync-camera-two-frames)).
 
 ### Dependencies
 

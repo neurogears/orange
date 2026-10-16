@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <time.h>
 #include <zmq.h>
@@ -26,23 +27,44 @@ uint64_t realtime_now() {
     return uint64_t(ts.tv_sec) * 1000000000ULL + uint64_t(ts.tv_nsec);
 }
 
-// Take the GVCP lock this long before a mode write's first latch is due: the
-// capture thread holds it for ~2 ms per frame.
+// Take the GVCP lock this long before a gate write is due: the capture
+// thread holds it for ~2 ms per frame.
 constexpr int64_t kLockLeadNs = 3000000;
-// The first mode write is scheduled at least this long after the request's
-// latch, to leave time for the lock lead.
+// The gate opens at least this long after the request's latch, to leave
+// time for the lock lead.
 constexpr int64_t kScheduleLeadNs = 5000000;
-// A mode write counts as clear of the exposures only if its whole bracket is
-// at least this far from them.
+// A gate edge counts as clear of the exposures only if its bounds are at
+// least this far from them.
 constexpr double kGuardNs = 100000;
-constexpr int kOffRetries = 3;
+// Warn at attach when a gate edge has less room than this either side.
+constexpr double kMinRoomNs = 300000;
+constexpr int kCloseRetries = 3;
 
 } // namespace
+
+SyncTimestampMarks parse_sync_timestamp_marks(const std::string &s) {
+    if (s == "exposure_start")
+        return SyncTimestampMarks::ExposureStart;
+    if (s == "exposure_end")
+        return SyncTimestampMarks::ExposureEnd;
+    return SyncTimestampMarks::Unknown;
+}
+
+const char *sync_timestamp_marks_name(SyncTimestampMarks m) {
+    switch (m) {
+    case SyncTimestampMarks::ExposureStart:
+        return "exposure_start";
+    case SyncTimestampMarks::ExposureEnd:
+        return "exposure_end";
+    default:
+        return "unknown";
+    }
+}
 
 struct SyncPulseResult {
     std::string id;
     bool ok = false;
-    bool pulsed = false; // the line was switched to Exposure
+    bool pulsed = false; // the gate was opened
     std::string error;
     uint64_t pulse = 0;
     uint64_t ptp_ns = 0;
@@ -52,10 +74,11 @@ struct SyncPulseResult {
     bool clean = false;
     bool recording = false;
     std::string camera;
-    int gpo = -1;
+    int gpo = -1, gate_gpo = -1;
     double exposure_ns = 0, period_ns = 0;
+    SyncTimestampMarks timestamp_marks = SyncTimestampMarks::Unknown;
     uint64_t request_ptp_ns = 0;
-    uint64_t on_before = 0, on_after = 0, off_before = 0, off_after = 0;
+    uint64_t open_min = 0, open_max = 0, close_min = 0, close_max = 0;
     uint64_t host_realtime_ns = 0;
 };
 
@@ -75,11 +98,13 @@ static json result_json(const SyncPulseResult &r) {
     j["recording"] = r.recording;
     j["camera"] = r.camera;
     j["gpo"] = r.gpo;
+    j["gate_gpo"] = r.gate_gpo;
     j["exposure_ns"] = int64_t(std::llround(r.exposure_ns));
     j["period_ns"] = int64_t(std::llround(r.period_ns));
+    j["timestamp_marks"] = sync_timestamp_marks_name(r.timestamp_marks);
     j["request_ptp_ns"] = r.request_ptp_ns;
-    j["on_ptp_ns"] = {r.on_before, r.on_after};
-    j["off_ptp_ns"] = {r.off_before, r.off_after};
+    j["gate_open_ptp_ns"] = {r.open_min, r.open_max};
+    j["gate_close_ptp_ns"] = {r.close_min, r.close_max};
     j["host_realtime_ns"] = r.host_realtime_ns;
     return j;
 }
@@ -180,12 +205,15 @@ std::string SyncPulse::HandleRequest(const std::string &request) {
     std::string reply;
     if (cmd == "pulse")
         reply = Pulse(id);
+    else if (cmd == "probe")
+        reply = Probe(id);
     else if (cmd == "status")
         reply = Status(id);
     else
         reply = error_reply(
             id, "unknown request \"" + text +
-                    "\"; send \"pulse\", \"pulse <id>\" or \"status\"");
+                    "\"; send \"pulse\", \"pulse <id>\", \"probe <us>\" or "
+                    "\"status\"");
     {
         std::lock_guard<std::mutex> lk(reply_mutex_);
         last_reply_ = reply;
@@ -207,15 +235,36 @@ std::string SyncPulse::Status(const std::string &id) {
     j["pulses"] = pulses_.load();
     if (attached_) {
         j["camera"] = config_.camera_serial;
-        j["gpo"] = config_.gpo_line;
+        j["gpo"] = config_.exposure_gpo;
+        j["gate_gpo"] = config_.gate_gpo;
         j["recording"] = log_.is_open();
         j["exposure_ns"] = int64_t(std::llround(config_.exposure_ns));
         j["period_ns"] = int64_t(std::llround(config_.period_ns));
+        j["timestamp_marks"] =
+            sync_timestamp_marks_name(config_.timestamp_marks);
     }
     return j.dump();
 }
 
 // ---- capture-thread side ----------------------------------------------------
+
+void SyncPulse::GapWindow(double P, double *lo, double *hi) const {
+    const double E = config_.exposure_ns;
+    switch (config_.timestamp_marks) {
+    case SyncTimestampMarks::ExposureStart: // exposure [ts, ts + E]
+        *lo = E;
+        *hi = P;
+        break;
+    case SyncTimestampMarks::ExposureEnd: // exposure [ts - E, ts]
+        *lo = 0;
+        *hi = P - E;
+        break;
+    default: // between exposures under both conventions
+        *lo = E;
+        *hi = P - E;
+        break;
+    }
+}
 
 bool SyncPulse::Attach(std::unique_ptr<SyncPulseCamera> camera,
                        const SyncPulseConfig &config) {
@@ -226,23 +275,48 @@ bool SyncPulse::Attach(std::unique_ptr<SyncPulseCamera> camera,
         return false;
     }
     const char *serial = config.camera_serial.c_str();
+    const int xl = config.exposure_gpo, gl = config.gate_gpo;
+    if (xl == gl) {
+        printf("[sync_pulse] Cam%s: the gate needs its own GPO line (both are "
+               "GPO_%d); no sync pulses\n",
+               serial, xl);
+        return false;
+    }
+    std::string x_mode, g_mode;
+    bool g_pol = false;
     {
         std::lock_guard<std::mutex> glk(*config.gvcp_mutex);
-        if (!camera->GetGpoMode(&original_mode_)) {
-            printf("[sync_pulse] Cam%s has no GPO_%d_Mode; no sync pulses\n",
-                   serial, config.gpo_line);
+        if (!camera->GetGpoMode(xl, &x_mode) ||
+            !camera->GetGpoMode(gl, &g_mode) ||
+            !camera->GetGpoPolarity(gl, &g_pol)) {
+            printf("[sync_pulse] Cam%s: cannot read GPO_%d / GPO_%d; no sync "
+                   "pulses\n",
+                   serial, xl, gl);
             return false;
         }
-        if (!camera->SetGpoMode("GPO")) {
-            printf("[sync_pulse] Cam%s: cannot put GPO_%d in GPO mode; no sync "
-                   "pulses\n",
-                   serial, config.gpo_line);
+        // Gate closed first, so the AND stays low while the modes change.
+        // These are the only mode writes until Detach: the camera is not
+        // streaming yet.
+        bool ok = camera->SetGpoPolarity(gl, !config.gate_open_polarity) &&
+                  camera->SetGpoMode(gl, "GPO") &&
+                  camera->SetGpoMode(xl, "Exposure");
+        if (!ok) {
+            camera->SetGpoMode(xl, x_mode);
+            camera->SetGpoMode(gl, g_mode);
+            camera->SetGpoPolarity(gl, g_pol);
+            printf("[sync_pulse] Cam%s: cannot put GPO_%d in Exposure mode and "
+                   "GPO_%d in GPO mode; no sync pulses\n",
+                   serial, xl, gl);
             return false;
         }
     }
     camera_ = std::move(camera);
     config_ = config;
-    bracket_ns_ = 1800000;
+    exposure_original_mode_ = x_mode;
+    gate_original_mode_ = g_mode;
+    gate_original_polarity_ = g_pol;
+    write_rtt_ns_ = 100000;
+    pulses_ = 0;
     {
         std::lock_guard<std::mutex> flk(frame_mutex_);
         have_frame_ = false;
@@ -255,22 +329,30 @@ bool SyncPulse::Attach(std::unique_ptr<SyncPulseCamera> camera,
             printf("[sync_pulse] cannot open %s\n", config_.log_path.c_str());
         else
             log_ << "pulse,id,ok,clean,ptp_ns,frame_id,frame_received,"
-                    "predicted_ptp_ns,request_ptp_ns,on_before_ns,on_after_ns,"
-                    "off_before_ns,off_after_ns,host_realtime_ns,error\n"
+                    "predicted_ptp_ns,request_ptp_ns,gate_open_min_ns,"
+                    "gate_open_max_ns,gate_close_min_ns,gate_close_max_ns,"
+                    "host_realtime_ns,error\n"
                  << std::flush;
     }
     attached_ = true;
-    printf("[sync_pulse] Cam%s GPO_%d: %s -> GPO (idle), exposure %.0f us, "
-           "period %.0f us%s%s\n",
-           serial, config_.gpo_line, original_mode_.c_str(),
+
+    double lo, hi;
+    GapWindow(config_.period_ns, &lo, &hi);
+    double room = (hi - lo) / 2.0 - kGuardNs;
+    printf("[sync_pulse] Cam%s: GPO_%d %s -> Exposure, gate GPO_%d %s -> GPO "
+           "(closed), exposure %.0f us, period %.0f us, timestamp marks %s: "
+           "gate edges %.2f ms after a frame, ±%.2f ms room%s%s\n",
+           serial, xl, x_mode.c_str(), gl, g_mode.c_str(),
            config_.exposure_ns / 1e3, config_.period_ns / 1e3,
+           sync_timestamp_marks_name(config_.timestamp_marks),
+           (lo + hi) / 2e6, std::max(room, 0.0) / 1e6,
            log_.is_open() ? ", log " : "",
            log_.is_open() ? config_.log_path.c_str() : "");
-    if (config_.exposure_ns + kGuardNs + bracket_ns_ / 2.0 >
-        config_.period_ns / 2.0)
-        printf("[sync_pulse] warning: exposure %.0f us leaves no room halfway "
-               "between frames at period %.0f us; pulses will not be clean\n",
-               config_.exposure_ns / 1e3, config_.period_ns / 1e3);
+    if (room < kMinRoomNs)
+        printf("[sync_pulse] warning: the gap between exposures leaves the "
+               "gate edges %s; pulses may not be clean. Set "
+               "\"sync_pulse_timestamp_marks\" (docs/zmq_sync.md, probe)\n",
+               room <= 0 ? "no room" : "little room");
     return true;
 }
 
@@ -310,32 +392,48 @@ void SyncPulse::Detach() {
         std::lock_guard<std::mutex> flk(frame_mutex_);
         frame_cv_.notify_all();
     }
+    const int xl = config_.exposure_gpo, gl = config_.gate_gpo;
     {
         std::lock_guard<std::mutex> glk(*config_.gvcp_mutex);
-        if (!camera_->SetGpoMode(original_mode_))
-            printf("[sync_pulse] Cam%s: could not restore GPO_%d to %s\n",
-                   config_.camera_serial.c_str(), config_.gpo_line,
-                   original_mode_.c_str());
+        bool ok = camera_->SetGpoPolarity(gl, !config_.gate_open_polarity);
+        ok = camera_->SetGpoMode(xl, exposure_original_mode_) && ok;
+        ok = camera_->SetGpoMode(gl, gate_original_mode_) && ok;
+        ok = camera_->SetGpoPolarity(gl, gate_original_polarity_) && ok;
+        if (!ok)
+            printf("[sync_pulse] Cam%s: could not restore GPO_%d / GPO_%d\n",
+                   config_.camera_serial.c_str(), xl, gl);
     }
     if (log_.is_open())
         log_.close();
     camera_.reset();
-    printf("[sync_pulse] Cam%s: %llu pulses, GPO_%d restored to %s\n",
+    printf("[sync_pulse] Cam%s: %llu pulses, GPO_%d restored to %s, GPO_%d to "
+           "%s\n",
            config_.camera_serial.c_str(), (unsigned long long)pulses_.load(),
-           config_.gpo_line, original_mode_.c_str());
+           xl, exposure_original_mode_.c_str(), gl,
+           gate_original_mode_.c_str());
 }
 
 // ---- one pulse --------------------------------------------------------------
 
-// Writes the line's mode with the middle of its latch bracket aimed at PTP
-// time target (0 = now). *before / *after: PTP latched just before / after the
-// write (0 = that latch failed); the camera carried out the write between them.
-bool SyncPulse::SwitchMode(uint64_t target_ptp, const char *mode,
-                           uint64_t *before, uint64_t *after) {
+bool SyncPulse::LatestFrame(uint64_t *ts, double *period) {
+    std::lock_guard<std::mutex> flk(frame_mutex_);
+    if (!have_frame_)
+        return false;
+    *ts = last_ts_;
+    *period = measured_period_ns_ > 0 ? measured_period_ns_ : config_.period_ns;
+    return true;
+}
+
+// Writes the gate's polarity with the write's midpoint aimed at PTP time
+// target (0 = now). *earliest / *latest: PTP bounds on when the gate changed
+// (0 = unknown, the latch after the write failed). The camera applies the
+// write within its round trip, and the latch right after it maps host time to
+// PTP to within half the latch's own round trip.
+bool SyncPulse::SetGate(uint64_t target_ptp, bool open, uint64_t *earliest,
+                        uint64_t *latest) {
     int64_t start = host_now();
     if (target_ptp != 0) {
-        start = map_host_ + (int64_t(target_ptp) - int64_t(map_ptp_)) -
-                bracket_ns_ / 2;
+        start = map_host_ + int64_t(target_ptp - map_ptp_) - write_rtt_ns_ / 2;
         std::this_thread::sleep_until(std::chrono::steady_clock::time_point(
             std::chrono::nanoseconds(start - kLockLeadNs)));
     }
@@ -343,22 +441,25 @@ bool SyncPulse::SwitchMode(uint64_t target_ptp, const char *mode,
     while (host_now() < start) {
         // Spin the last few ms: sleep wake-up can be late by more than that.
     }
-    int64_t h_before = 0, h_after = 0;
-    bool ok_before = camera_->LatchPtp(before, &h_before);
-    bool ok_write = camera_->SetGpoMode(mode);
-    bool ok_after = camera_->LatchPtp(after, &h_after);
-    if (!ok_before)
-        *before = 0;
-    if (!ok_after)
-        *after = 0;
-    if (ok_after) {
-        map_ptp_ = *after;
+    bool polarity =
+        open ? config_.gate_open_polarity : !config_.gate_open_polarity;
+    int64_t w0 = host_now();
+    bool ok = camera_->SetGpoPolarity(config_.gate_gpo, polarity);
+    int64_t w1 = host_now();
+    uint64_t after = 0;
+    int64_t h_after = 0, rtt = 0;
+    *earliest = *latest = 0;
+    if (camera_->LatchPtp(&after, &h_after, &rtt)) {
+        map_ptp_ = after;
         map_host_ = h_after;
+        // PTP at host time h, wrapping arithmetic for h < h_after.
+        auto at = [&](int64_t h) { return after + uint64_t(h - h_after); };
+        *earliest = at(w0) - uint64_t(rtt / 2);
+        *latest = at(w1) + uint64_t(rtt / 2);
     }
-    if (ok_before && ok_after && *after > *before)
-        bracket_ns_ =
-            std::clamp<int64_t>(int64_t(*after - *before), 200000, 5000000);
-    return ok_write;
+    if (ok && w1 > w0)
+        write_rtt_ns_ = std::clamp<int64_t>(w1 - w0, 20000, 2000000);
+    return ok;
 }
 
 std::string SyncPulse::Pulse(const std::string &id) {
@@ -368,47 +469,44 @@ std::string SyncPulse::Pulse(const std::string &id) {
     if (!attached_)
         return error_reply(id, "sync camera is not streaming");
     r.camera = config_.camera_serial;
-    r.gpo = config_.gpo_line;
+    r.gpo = config_.exposure_gpo;
+    r.gate_gpo = config_.gate_gpo;
     r.recording = log_.is_open();
     r.exposure_ns = config_.exposure_ns;
+    r.timestamp_marks = config_.timestamp_marks;
 
     uint64_t t_last;
     double P;
-    {
-        std::lock_guard<std::mutex> flk(frame_mutex_);
-        if (!have_frame_)
-            return error_reply(id, "no frames from the sync camera yet");
-        t_last = last_ts_;
-        P = measured_period_ns_ > 0 ? measured_period_ns_ : config_.period_ns;
-    }
+    if (!LatestFrame(&t_last, &P))
+        return error_reply(id, "no frames from the sync camera yet");
     r.period_ns = P;
-    const double E = config_.exposure_ns;
 
     {
         std::lock_guard<std::mutex> glk(*config_.gvcp_mutex);
-        if (!camera_->LatchPtp(&map_ptp_, &map_host_))
+        int64_t rtt;
+        if (!camera_->LatchPtp(&map_ptp_, &map_host_, &rtt))
             return error_reply(id, "PTP latch failed");
     }
     r.request_ptp_ns = map_ptp_;
 
-    // Frames sit on a fixed PTP grid t_last + k * P. Pick the first frame k
-    // whose following half-period mark is far enough ahead; the line goes to
-    // Exposure there, lets frame k + 1 through, and goes back to GPO at the
-    // half-period mark after it.
+    // Frames sit on a fixed PTP grid t_last + k * P. The gate opens in the
+    // middle of the first gap (after frame k) far enough ahead, lets frame
+    // k + 1 through, and closes in the middle of the gap after it.
     // Times below are offsets from t_last (PTP ns since 1970 do not fit a
     // double exactly).
     auto at = [t_last](double offset) {
         return t_last + uint64_t(std::llround(offset));
     };
     auto since = [t_last](uint64_t t) { return double(int64_t(t - t_last)); };
-    double earliest = since(map_ptp_) + kScheduleLeadNs + bracket_ns_ / 2.0;
-    double k = std::ceil((earliest - P / 2.0) / P);
+    double lo, hi;
+    GapWindow(P, &lo, &hi);
+    const double mid = (lo + hi) / 2.0;
+    double earliest = since(map_ptp_) + kScheduleLeadNs;
+    double k = std::ceil((earliest - mid) / P);
     if (k < 0)
         k = 0;
     double t_k = k * P;
     uint64_t t_pulse = at(t_k + P);
-    uint64_t on_target = at(t_k + P / 2.0);
-    uint64_t off_target = at(t_k + 1.5 * P);
     r.predicted_ptp_ns = t_pulse;
 
     {
@@ -417,34 +515,34 @@ std::string SyncPulse::Pulse(const std::string &id) {
         got_want_ = passed_want_ = false;
     }
 
-    if (!SwitchMode(on_target, "Exposure", &r.on_before, &r.on_after)) {
+    const std::string gate = "GPO_" + std::to_string(config_.gate_gpo);
+    if (!SetGate(at(t_k + mid), true, &r.open_min, &r.open_max)) {
+        uint64_t a, b;
+        SetGate(0, false, &a, &b); // whatever the failed write left
         std::lock_guard<std::mutex> flk(frame_mutex_);
         want_ts_ = 0;
-        return error_reply(id, "could not switch GPO_" +
-                                   std::to_string(config_.gpo_line) +
-                                   " to Exposure; no pulse");
+        return error_reply(id, "could not open the gate (" + gate +
+                                   " polarity write failed); no pulse");
     }
     r.pulsed = true;
-    bool off_ok = SwitchMode(off_target, "GPO", &r.off_before, &r.off_after);
-    for (int i = 0; !off_ok && i < kOffRetries; i++)
-        off_ok = SwitchMode(0, "GPO", &r.off_before, &r.off_after);
+    bool closed = SetGate(at(t_k + P + mid), false, &r.close_min, &r.close_max);
+    for (int i = 0; !closed && i < kCloseRetries; i++)
+        closed = SetGate(0, false, &r.close_min, &r.close_max);
 
-    // Both brackets must sit between exposures, for either timestamp
-    // convention: exposure in [ts, ts + E] or in [ts - E, ts].
-    auto clear = [&](uint64_t before, uint64_t after, double t_frame) {
-        return before != 0 && after != 0 &&
-               since(before) >= t_frame + E + kGuardNs &&
-               since(after) <= t_frame + P - E - kGuardNs;
+    // Both gate edges must sit in the gap between exposures.
+    auto clear = [&](uint64_t a, uint64_t b, double t_frame) {
+        return a != 0 && b != 0 && since(a) >= t_frame + lo + kGuardNs &&
+               since(b) <= t_frame + hi - kGuardNs;
     };
-    r.clean = off_ok && clear(r.on_before, r.on_after, t_k) &&
-              clear(r.off_before, r.off_after, t_k + P);
-    r.ok = off_ok;
-    if (!off_ok)
-        r.error = "could not switch GPO_" + std::to_string(config_.gpo_line) +
-                  " back to GPO mode: it may be pulsing on every exposure";
+    r.clean = closed && clear(r.open_min, r.open_max, t_k) &&
+              clear(r.close_min, r.close_max, t_k + P);
+    r.ok = closed;
+    if (!closed)
+        r.error = "could not close the gate (" + gate +
+                  "): it may pass every exposure";
     else if (!r.clean)
-        r.error = "a mode switch overlapped an exposure window: the pulse may "
-                  "be cut short or doubled";
+        r.error = "a gate edge was not clear of the exposures: the pulse may "
+                  "be cut short or include a second exposure";
     plk.unlock();
 
     // Reply with the camera's own timestamp of the pulsed frame once it is in.
@@ -469,6 +567,76 @@ std::string SyncPulse::Pulse(const std::string &id) {
     return result_json(r).dump();
 }
 
+// "probe <offset_us> [<id>]": opens the gate offset_us after a frame
+// timestamp and closes it one period later, so the Harp log shows which part
+// of the exposures the timestamps sit next to (docs/zmq_sync.md).
+std::string SyncPulse::Probe(const std::string &args) {
+    const char *s = args.c_str();
+    char *end = nullptr;
+    double offset_us = std::strtod(s, &end);
+    std::string id = end ? std::string(end) : std::string();
+    id.erase(0, id.find_first_not_of(" \t"));
+    if (end == s)
+        return error_reply(id, "probe needs an offset in us after a frame "
+                               "timestamp: \"probe <us> [<id>]\"");
+    std::lock_guard<std::mutex> plk(pulse_mutex_);
+    if (!attached_)
+        return error_reply(id, "sync camera is not streaming");
+    uint64_t t_last;
+    double P;
+    if (!LatestFrame(&t_last, &P))
+        return error_reply(id, "no frames from the sync camera yet");
+    const double off = offset_us * 1e3;
+    if (!(off >= 0 && off < P))
+        return error_reply(id, "probe offset must be in [0, period)");
+    {
+        std::lock_guard<std::mutex> glk(*config_.gvcp_mutex);
+        int64_t rtt;
+        if (!camera_->LatchPtp(&map_ptp_, &map_host_, &rtt))
+            return error_reply(id, "PTP latch failed");
+    }
+    auto at = [t_last](double offset) {
+        return t_last + uint64_t(std::llround(offset));
+    };
+    double earliest = double(int64_t(map_ptp_ - t_last)) + kScheduleLeadNs;
+    double k = std::ceil((earliest - off) / P);
+    if (k < 0)
+        k = 0;
+    double t_k = k * P;
+    uint64_t open_min, open_max, close_min = 0, close_max = 0;
+    if (!SetGate(at(t_k + off), true, &open_min, &open_max)) {
+        uint64_t a, b;
+        SetGate(0, false, &a, &b);
+        return error_reply(id, "could not open the gate; no probe");
+    }
+    bool closed = SetGate(at(t_k + P + off), false, &close_min, &close_max);
+    for (int i = 0; !closed && i < kCloseRetries; i++)
+        closed = SetGate(0, false, &close_min, &close_max);
+
+    json j;
+    j["id"] = id;
+    j["ok"] = closed;
+    if (!closed)
+        j["error"] = "could not close the gate: it may pass every exposure";
+    j["probe"] = true;
+    j["offset_ns"] = int64_t(std::llround(off));
+    j["frame_ptp_ns"] = {at(t_k), at(t_k + P)};
+    j["gate_open_ptp_ns"] = {open_min, open_max};
+    j["gate_close_ptp_ns"] = {close_min, close_max};
+    j["exposure_ns"] = int64_t(std::llround(config_.exposure_ns));
+    j["period_ns"] = int64_t(std::llround(P));
+    j["camera"] = config_.camera_serial;
+    j["gpo"] = config_.exposure_gpo;
+    j["gate_gpo"] = config_.gate_gpo;
+    printf("[sync_pulse] probe %.0f us: gate open %.0f us after frame %llu, "
+           "closed %.0f us after frame %llu\n",
+           offset_us, double(int64_t(open_min - at(t_k))) / 1e3,
+           (unsigned long long)at(t_k),
+           double(int64_t(close_min - at(t_k + P))) / 1e3,
+           (unsigned long long)at(t_k + P));
+    return j.dump();
+}
+
 void SyncPulse::Log(const SyncPulseResult &r) {
     std::lock_guard<std::mutex> lk(pulse_mutex_);
     if (!log_.is_open())
@@ -480,8 +648,8 @@ void SyncPulse::Log(const SyncPulseResult &r) {
     log_ << r.pulse << "," << id << "," << int(r.ok) << "," << int(r.clean)
          << "," << r.ptp_ns << "," << r.frame_id << ","
          << int(r.frame_received) << "," << r.predicted_ptp_ns << ","
-         << r.request_ptp_ns << "," << r.on_before << "," << r.on_after << ","
-         << r.off_before << "," << r.off_after << "," << r.host_realtime_ns
+         << r.request_ptp_ns << "," << r.open_min << "," << r.open_max << ","
+         << r.close_min << "," << r.close_max << "," << r.host_realtime_ns
          << "," << r.error << "\n"
          << std::flush;
 }

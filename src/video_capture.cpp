@@ -127,6 +127,24 @@ void load_camera_json_config_files(std::string file_name,
     if (camera_config.contains("sync_pulse_gpo")) {
         camera_params->sync_pulse_gpo = camera_config["sync_pulse_gpo"];
     }
+    if (camera_config.contains("sync_pulse_gate_gpo")) {
+        camera_params->sync_pulse_gate_gpo = camera_config["sync_pulse_gate_gpo"];
+    }
+    if (camera_config.contains("sync_pulse_gate_open_polarity")) {
+        camera_params->sync_pulse_gate_open_polarity =
+            camera_config["sync_pulse_gate_open_polarity"];
+    }
+    if (camera_config.contains("sync_pulse_timestamp_marks")) {
+        camera_params->sync_pulse_timestamp_marks =
+            camera_config["sync_pulse_timestamp_marks"];
+        if (parse_sync_timestamp_marks(
+                camera_params->sync_pulse_timestamp_marks) ==
+            SyncTimestampMarks::Unknown)
+            printf("[sync_pulse] sync_pulse_timestamp_marks \"%s\" is not "
+                   "\"exposure_start\" or \"exposure_end\"; treated as "
+                   "unknown\n",
+                   camera_params->sync_pulse_timestamp_marks.c_str());
+    }
     if (camera_config.contains("sync_pulse_endpoint")) {
         camera_params->sync_pulse_endpoint =
             camera_config["sync_pulse_endpoint"];
@@ -499,13 +517,20 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
         start_ptp_sync(&ptp_state, ptp_params, camera_params, ecam, 3);
     }
 
-    // The sync-pulse camera takes over its GPO line while it streams, so the
-    // ZeroMQ server can let single exposures through to it (sync_pulse.h).
+    // The sync-pulse camera takes over two GPO lines while it streams (one in
+    // Exposure mode, one as a gate), so the ZeroMQ server can let single
+    // exposures through to the Harp input (sync_pulse.h).
     bool sync_pulse = false;
-    if (camera_params->sync_pulse_gpo >= 0 && g_sync_pulse.ServerRunning()) {
+    if (camera_params->sync_pulse_gpo >= 0 &&
+        camera_params->sync_pulse_gate_gpo >= 0 &&
+        g_sync_pulse.ServerRunning()) {
         SyncPulseConfig cfg;
         cfg.camera_serial = camera_params->camera_serial;
-        cfg.gpo_line = camera_params->sync_pulse_gpo;
+        cfg.exposure_gpo = camera_params->sync_pulse_gpo;
+        cfg.gate_gpo = camera_params->sync_pulse_gate_gpo;
+        cfg.gate_open_polarity = camera_params->sync_pulse_gate_open_polarity;
+        cfg.timestamp_marks = parse_sync_timestamp_marks(
+            camera_params->sync_pulse_timestamp_marks);
         cfg.exposure_ns = double(camera_params->exposure) * 1e3;
         cfg.period_ns = camera_params->frame_rate > 0
                             ? 1e9 / double(camera_params->frame_rate)
@@ -517,9 +542,7 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
                            std::to_string(camera_params->sync_pulse_gpo) +
                            ".csv";
         sync_pulse = g_sync_pulse.Attach(
-            std::make_unique<EvtSyncPulseCamera>(&ecam->camera,
-                                                 cfg.gpo_line),
-            cfg);
+            std::make_unique<EvtSyncPulseCamera>(&ecam->camera), cfg);
         if (sync_pulse && !cfg.log_path.empty())
             chown_to_invoking_user(cfg.log_path);
     }
