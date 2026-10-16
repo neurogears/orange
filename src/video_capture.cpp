@@ -124,8 +124,9 @@ void load_camera_json_config_files(std::string file_name,
     } else {
         camera_params->line_time = 0;
     }
-    if (camera_config.contains("sync_pulse_gpo")) {
-        camera_params->sync_pulse_gpo = camera_config["sync_pulse_gpo"];
+    if (camera_config.contains("sync_pulse_exposure_gpo")) {
+        camera_params->sync_pulse_exposure_gpo =
+            camera_config["sync_pulse_exposure_gpo"];
     }
     if (camera_config.contains("sync_pulse_gate_gpo")) {
         camera_params->sync_pulse_gate_gpo = camera_config["sync_pulse_gate_gpo"];
@@ -521,12 +522,12 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
     // Exposure mode, one as a gate), so the ZeroMQ server can let single
     // exposures through to the Harp input (sync_pulse.h).
     bool sync_pulse = false;
-    if (camera_params->sync_pulse_gpo >= 0 &&
+    if (camera_params->sync_pulse_exposure_gpo >= 0 &&
         camera_params->sync_pulse_gate_gpo >= 0 &&
         g_sync_pulse.ServerRunning()) {
         SyncPulseConfig cfg;
         cfg.camera_serial = camera_params->camera_serial;
-        cfg.exposure_gpo = camera_params->sync_pulse_gpo;
+        cfg.exposure_gpo = camera_params->sync_pulse_exposure_gpo;
         cfg.gate_gpo = camera_params->sync_pulse_gate_gpo;
         cfg.gate_open_polarity = camera_params->sync_pulse_gate_open_polarity;
         cfg.timestamp_marks = parse_sync_timestamp_marks(
@@ -537,10 +538,11 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
                             : 0.0;
         cfg.gvcp_mutex = &gvcp_mutex;
         if (camera_control->record_video && !folder_name.empty())
-            cfg.log_path = folder_name + "/sync_pulses_Cam" +
-                           camera_params->camera_serial + "_gpo" +
-                           std::to_string(camera_params->sync_pulse_gpo) +
-                           ".csv";
+            cfg.log_path =
+                folder_name + "/sync_pulses_Cam" +
+                camera_params->camera_serial + "_gpo" +
+                std::to_string(camera_params->sync_pulse_exposure_gpo) +
+                ".csv";
         sync_pulse = g_sync_pulse.Attach(
             std::make_unique<EvtSyncPulseCamera>(&ecam->camera), cfg);
         if (sync_pulse && !cfg.log_path.empty())

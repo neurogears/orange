@@ -36,9 +36,9 @@ struct CameraParams {
     bool lens_control; // run IrisInit/FocusInit on open so an EF/RF lens is controllable
     unsigned int line_time; // ns per sensor row; 0 = leave the camera's current value
     // ZeroMQ sync pulses (sync_pulse.h); -1 = none. At most one camera sets
-    // them. sync_pulse_gpo carries the exposure output, sync_pulse_gate_gpo
-    // the gate; the Harp input sees their AND.
-    int sync_pulse_gpo = -1;
+    // them. sync_pulse_exposure_gpo carries the exposure output,
+    // sync_pulse_gate_gpo the gate; the Harp input sees their AND.
+    int sync_pulse_exposure_gpo = -1;
     int sync_pulse_gate_gpo = -1;
     bool sync_pulse_gate_open_polarity = true; // GPO_<gate>_Polarity that opens it
     std::string sync_pulse_timestamp_marks;    // "exposure_start", "exposure_end" or "" (unknown)

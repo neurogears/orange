@@ -24,10 +24,10 @@ Both the edge and its timestamp come from the camera:
 - The PTP time reported is the camera's frame timestamp for that exposure: the
   `timestamp` column of `Cam<serial>_meta.csv`, latched by the camera.
 
-One line (`sync_pulse_gpo`) stays in `Exposure` mode while the camera streams
-and pulses on every exposure. A second line (`sync_pulse_gate_gpo`) stays in
-manual `GPO` mode, and its polarity is a gate, closed between requests. The
-Harp input sees the AND of the two. For a pulse, orange opens the gate in the
+One line (`sync_pulse_exposure_gpo`) stays in `Exposure` mode while the
+camera streams and pulses on every exposure. A second line
+(`sync_pulse_gate_gpo`) stays in manual `GPO` mode, and its polarity is a
+gate, closed between requests. The Harp input sees the AND of the two. For a pulse, orange opens the gate in the
 gap before one exposure and closes it in the gap after:
 
 ```
@@ -91,7 +91,7 @@ it in the json.
    {
        "name": "26",
        ...
-       "sync_pulse_gpo": 0,
+       "sync_pulse_exposure_gpo": 0,
        "sync_pulse_gate_gpo": 1,
        "sync_pulse_timestamp_marks": "exposure_start",
        "sync_pulse_endpoint": "tcp://*:5560"
@@ -100,7 +100,7 @@ it in the json.
 
    | key | meaning |
    |---|---|
-   | `sync_pulse_gpo` | the exposure line, in `Exposure` mode while streaming |
+   | `sync_pulse_exposure_gpo` | the exposure line, in `Exposure` mode while streaming |
    | `sync_pulse_gate_gpo` | the gate line, in `GPO` mode while streaming. Required: without it orange runs no sync server |
    | `sync_pulse_timestamp_marks` | `"exposure_start"` or `"exposure_end"`, see above. Optional, default unknown |
    | `sync_pulse_gate_open_polarity` | the `GPO_<gate>_Polarity` value that opens the gate. Optional, default `true` (polarity false = low in `GPO` mode, as found on the random-GPO branch) |
@@ -165,7 +165,7 @@ The reply to `pulse` is one line of JSON:
 | `frame_received` | whether `ptp_ns`/`frame_id` come from the received frame |
 | `clean` | both gate edges' PTP bounds sat in the gap between exposures, with a 0.1 ms guard, for the configured convention. If false, the pulse may be cut short or include a second exposure; drop that pair. It cannot catch a wrongly configured convention; `probe` does |
 | `recording` | orange is recording (so `frame_id` refers to a file on disk) |
-| `camera`, `gpo`, `gate_gpo` | sync camera serial, exposure line, gate line |
+| `camera`, `exposure_gpo`, `gate_gpo` | sync camera serial, exposure line, gate line |
 | `exposure_ns`, `period_ns` | exposure; frame period as measured from the timestamps |
 | `timestamp_marks` | the configured convention |
 | `request_ptp_ns` | PTP time when orange started handling the request |
@@ -181,12 +181,12 @@ or the camera refused the gate write.
 Example:
 
 ```json
-{"camera":"2010125","clean":true,"exposure_ns":8000000,"frame_id":4127,"frame_received":true,"gate_close_ptp_ns":[1760531163012237423,1760531163012429963],"gate_gpo":1,"gate_open_ptp_ns":[1760531162995570757,1760531162995763297],"gpo":0,"host_realtime_ns":1760531200123456789,"id":"17","ok":true,"period_ns":16666667,"ptp_ns":1760531163000000360,"pulse":17,"recording":true,"request_ptp_ns":1760531162981234567,"timestamp_marks":"exposure_start"}
+{"camera":"2010125","clean":true,"exposure_gpo":0,"exposure_ns":8000000,"frame_id":4127,"frame_received":true,"gate_close_ptp_ns":[1760531163012237423,1760531163012429963],"gate_gpo":1,"gate_open_ptp_ns":[1760531162995570757,1760531162995763297],"host_realtime_ns":1760531200123456789,"id":"17","ok":true,"period_ns":16666667,"ptp_ns":1760531163000000360,"pulse":17,"recording":true,"request_ptp_ns":1760531162981234567,"timestamp_marks":"exposure_start"}
 ```
 
 The reply to `probe` has `probe: true`, `offset_ns`, `frame_ptp_ns` (the two
 frame timestamps the gate edges are placed after), `gate_open_ptp_ns`,
-`gate_close_ptp_ns`, `exposure_ns`, `period_ns`, `camera`, `gpo`, `gate_gpo`.
+`gate_close_ptp_ns`, `exposure_ns`, `period_ns`, `camera`, `exposure_gpo`, `gate_gpo`.
 
 ## Bonsai side
 
@@ -336,8 +336,8 @@ the temperature plot.
   frame (`OnFrame`), and detaches after `AcquisitionStop` (restores the
   lines).
 - `orange.cpp`: starts the server when cameras open (only if the sync camera
-  sets both `sync_pulse_gpo` and a separate `sync_pulse_gate_gpo`), stops it
-  on close/exit.
+  sets both `sync_pulse_exposure_gpo` and a separate `sync_pulse_gate_gpo`),
+  stops it on close/exit.
 
 ## Test
 

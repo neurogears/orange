@@ -832,17 +832,19 @@ int main(int argc, char **args) {
                             }
                         }
                         // ZeroMQ sync-pulse server, if a camera config sets
-                        // "sync_pulse_gpo" and "sync_pulse_gate_gpo"
+                        // "sync_pulse_exposure_gpo" and "sync_pulse_gate_gpo"
                         // (sync_pulse.h). That camera's capture thread
                         // attaches to it while streaming.
                         for (int i = 0; i < num_cameras; i++) {
                             const CameraParams &cp = cameras_params[i];
-                            if (cp.sync_pulse_gpo < 0)
+                            if (cp.sync_pulse_exposure_gpo < 0)
                                 continue;
                             if (cp.sync_pulse_gate_gpo < 0 ||
-                                cp.sync_pulse_gate_gpo == cp.sync_pulse_gpo) {
-                                printf("[sync_pulse] Cam%s sets sync_pulse_gpo "
-                                       "but no separate sync_pulse_gate_gpo: "
+                                cp.sync_pulse_gate_gpo ==
+                                    cp.sync_pulse_exposure_gpo) {
+                                printf("[sync_pulse] Cam%s sets "
+                                       "sync_pulse_exposure_gpo but no "
+                                       "separate sync_pulse_gate_gpo: "
                                        "sync pulses need a second GPO line as "
                                        "a gate (docs/zmq_sync.md); no sync "
                                        "pulses\n",

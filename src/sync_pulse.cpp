@@ -74,7 +74,7 @@ struct SyncPulseResult {
     bool clean = false;
     bool recording = false;
     std::string camera;
-    int gpo = -1, gate_gpo = -1;
+    int exposure_gpo = -1, gate_gpo = -1;
     double exposure_ns = 0, period_ns = 0;
     SyncTimestampMarks timestamp_marks = SyncTimestampMarks::Unknown;
     uint64_t request_ptp_ns = 0;
@@ -97,7 +97,7 @@ static json result_json(const SyncPulseResult &r) {
     j["clean"] = r.clean;
     j["recording"] = r.recording;
     j["camera"] = r.camera;
-    j["gpo"] = r.gpo;
+    j["exposure_gpo"] = r.exposure_gpo;
     j["gate_gpo"] = r.gate_gpo;
     j["exposure_ns"] = int64_t(std::llround(r.exposure_ns));
     j["period_ns"] = int64_t(std::llround(r.period_ns));
@@ -235,7 +235,7 @@ std::string SyncPulse::Status(const std::string &id) {
     j["pulses"] = pulses_.load();
     if (attached_) {
         j["camera"] = config_.camera_serial;
-        j["gpo"] = config_.exposure_gpo;
+        j["exposure_gpo"] = config_.exposure_gpo;
         j["gate_gpo"] = config_.gate_gpo;
         j["recording"] = log_.is_open();
         j["exposure_ns"] = int64_t(std::llround(config_.exposure_ns));
@@ -469,7 +469,7 @@ std::string SyncPulse::Pulse(const std::string &id) {
     if (!attached_)
         return error_reply(id, "sync camera is not streaming");
     r.camera = config_.camera_serial;
-    r.gpo = config_.exposure_gpo;
+    r.exposure_gpo = config_.exposure_gpo;
     r.gate_gpo = config_.gate_gpo;
     r.recording = log_.is_open();
     r.exposure_ns = config_.exposure_ns;
@@ -626,7 +626,7 @@ std::string SyncPulse::Probe(const std::string &args) {
     j["exposure_ns"] = int64_t(std::llround(config_.exposure_ns));
     j["period_ns"] = int64_t(std::llround(P));
     j["camera"] = config_.camera_serial;
-    j["gpo"] = config_.exposure_gpo;
+    j["exposure_gpo"] = config_.exposure_gpo;
     j["gate_gpo"] = config_.gate_gpo;
     printf("[sync_pulse] probe %.0f us: gate open %.0f us after frame %llu, "
            "closed %.0f us after frame %llu\n",
