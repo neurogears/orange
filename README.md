@@ -91,6 +91,8 @@ orange --preset <config/local folder> --chunk-seconds 1800 \
 
 To align orange with another acquisition system, e.g. Bonsai + a Harp Behavior board on a different PC, add `"sync_pulse_gpo": <line>` to one camera's json in the preset. orange then answers ZeroMQ requests on `tcp://*:5560`. For each `pulse` request it lets exactly one exposure of that camera through to the GPO line and replies (JSON) with that frame's PTP timestamp and `frame_id`, the same values as in `Cam<serial>_meta.csv`. The edge comes from the camera's own exposure output, and the timestamp is the camera's own frame timestamp, so nothing is estimated from network timing. The other system logs the pulse in Harp time, which gives one PTP ↔ Harp pair per request. Protocol, setup and tests are in [docs/zmq_sync.md](docs/zmq_sync.md); `tools/sync_pulse_client.py` sends requests from the command line.
 
+**Known problem:** on the rig's HB cameras each pulse currently costs the sync camera two frames (the camera restarts a frame when its GPO line's mode is switched mid-stream), so its frame count falls behind the other cameras'. Details and evidence are in [docs/zmq_sync.md](docs/zmq_sync.md#hardware-result-each-pulse-costs-the-sync-camera-two-frames); the fix is on branch `ng-dev/sync-gate`.
+
 ### Dependencies
 
 The minimal build requires: CUDA toolkit (with NPP + NVENC), the Emergent eSDK (`/opt/EVT/eSDK`), FFmpeg (used only for `.mp4` muxing), and the GUI stack (GLFW, GLEW, OpenGL), and ZeroMQ (`libzmq3-dev`, for the sync-pulse server). ImGui/ImPlot/ImGuiFileDialog/IconFontCppHeaders are vendored as git submodules. There is no OpenCV, TensorRT, ENet, or FlatBuffers dependency.

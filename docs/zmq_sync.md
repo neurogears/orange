@@ -10,6 +10,15 @@ that frame's PTP timestamp. The other PC logs the pulse on a Harp digital input
 in Harp time. Each request gives one (PTP, Harp) pair, which can be used
 directly.
 
+> **Known problem (found 2026-10-16):** on the rig's HB cameras every pulse
+> costs the sync camera two frames, and every reply is `clean: false`. The
+> camera restarts a frame whenever its GPO line's mode is switched while it
+> streams. Do not send pulses during recordings that need equal frame counts
+> across cameras. See
+> [Hardware result](#hardware-result-each-pulse-costs-the-sync-camera-two-frames);
+> the fix (a second GPO line as a gate, so no mode changes while streaming)
+> is on branch `ng-dev/sync-gate`.
+
 ## Why the timestamp is exact
 
 Both the edge and its timestamp come from the camera:
@@ -155,7 +164,87 @@ with the Harp log (or a scope) during a first run:
    up to ~5 ms (it waits for its slot), so that camera's per-frame GVCP
    (PtpOffset, latch) is delayed at most that long, once or twice per
    request. Frames queue in the SDK's frame ring meanwhile. Check the drop
-   counters.
+   counters. **Does not hold**: the camera itself skips two exposures per
+   pulse, see below.
+
+## Hardware result: each pulse costs the sync camera two frames
+
+EmergentTech2, 8 HB cameras at 60 fps, GPUDirect, sync camera 2010125 on
+GPO_0. Every pulse so far made the sync camera skip two exposures, and every
+reply had `clean: false` ("a mode switch overlapped an exposure window: the
+pulse may be cut short or doubled"):
+
+| recording | build | sync camera exposure | pulses | sync camera frames | other 7 cameras |
+|---|---|---|---|---|---|
+| `2026_10_15_17_23_12` (16 h, one file) | `swc_dev_zmq_sync` | 3 ms | 22 | 3 453 123 | 3 453 167 (44 more) |
+| `2026_10_16_13_17_13` (30 min chunks) | `53bca67` | 8 ms | 6 | 52 629 | 52 641 (12 more) |
+
+The camera never exposed those frames; the host did not lose them. Its frame
+id runs on without a gap, so orange's dropped-frame counter stays at 0. They
+show as timestamp gaps: `tools/check_chunks.py` reports `camera gaps 6 (12
+frames)` for the sync camera, and `chunk_complete.json` has
+`frame_counts_equal: false`. The other cameras are unaffected and stay
+aligned to within ~20 ns.
+
+### What the timestamps show
+
+T0 is the timestamp of the frame before the pulse, P the frame period, E
+the sync camera's exposure. All 28 pulses in both runs match this pattern
+to within ~0.1 ms:
+
+| event | time |
+|---|---|
+| `Exposure` mode write sent | T0 + 5.9 ms (T0 + 7.5 ms for the first pulse of a stream). At E = 3 ms that is between exposures whichever moment the timestamp marks |
+| that write acknowledged | T0 + P + E − 0.49 ms, whenever it was sent (latch-to-latch bracket 11.7–18.3 ms, against ~1.7 ms expected) |
+| pulsed frame's timestamp | T0 + P + E − 0.54 ms instead of T0 + P: E − 0.54 ms off the PTP grid (2.46 ms at 3 ms exposure, 7.46 ms at 8 ms) |
+| `GPO` mode write (sent right after) acknowledged | pulsed frame + P + E − 0.49 ms (bracket 15.7–22.9 ms) |
+| next frame | T0 + 4P, back on the grid. Slots T0 + 2P and T0 + 3P are never exposed |
+
+So the camera does not apply a `GPO_<N>_Mode` write when it arrives. It holds
+the write until a fixed point of its frame cycle, and applying it restarts
+the frame in progress. When the host sends the write makes no difference:
+the half-period scheduling already sent it between exposures. Only keeping
+the mode fixed while streaming avoids it.
+
+### What "a mode switch overlapped an exposure window" meant
+
+`clean` checks that each mode write, bracketed by PTP latches before and
+after it, sat between two exposures. The camera holds the write, so the
+bracket is 12–23 ms, more than a frame period: it always spans an exposure, and every
+pulse was flagged. The flag was right: the pulse came from a restarted frame,
+off the grid, and the two frames after it were lost. At 8 ms exposure and
+60 fps, the startup warning (`exposure 8000 us leaves no room halfway between
+frames`) also applies on its own: halfway between two timestamps is only
+0.33 ms from an exposure under one of the two timestamp conventions.
+
+### Polarity writes do not disturb capture
+
+The random-GPO branch (`swc_dev_ptp_harp_sync`) drove its line with
+`GPO_<N>_Polarity` writes while streaming, setting the mode only before
+`AcquisitionStart` and after `AcquisitionStop`. In `2026_10_15_11_40_00`
+(83 writes) and `2026_10_15_13_51_30` (366 writes), all 8 cameras ended on the
+same frame count with no off-grid intervals. Each write took 102 µs median
+(171 µs max) round trip, so the camera does not hold polarity writes the way
+it holds mode writes.
+
+### Fix
+
+Keep both lines' modes fixed while streaming:
+- one GPO line in `Exposure` mode;
+- a second GPO line in `GPO` mode as a gate, opened with a polarity write in
+  the gap before the requested frame and closed in the gap after it;
+- the Harp input gets the AND of the two lines, with a gate in hardware or
+  with both lines on Harp inputs and the AND done in Bonsai.
+
+The pulse is still the camera's own exposure output, and `ptp_ns` is still
+its frame timestamp. This is on branch `ng-dev/sync-gate`.
+
+### Also seen
+
+- The pulse count is not reset between streams. The second recording of that
+  session (`2026_10_16_13_40_58`) logged `Cam2010125: 6 pulses` with no
+  pulses sent, and pulse numbers in a recording's csv continue from the
+  previous stream.
 
 ## Concurrent GVCP
 
