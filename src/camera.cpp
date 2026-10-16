@@ -249,6 +249,31 @@ void update_line_time_value(Emergent::CEmergentCamera *camera,
            line_time_max);
 }
 
+// PGAGain is the sensor's programmable gain amplifier (PGA) setting, separate
+// from Gain/GainRaw. Like LineTime it is optional: -1 leaves the
+// camera's current value.
+void update_pga_gain_value(Emergent::CEmergentCamera *camera,
+                           CameraParams *camera_params) {
+    unsigned int current = 0;
+    EVT_CameraGetUInt32ParamMax(camera, "PGAGain", &camera_params->pga_gain_max);
+    EVT_CameraGetUInt32ParamMin(camera, "PGAGain", &camera_params->pga_gain_min);
+    EVT_CameraGetUInt32ParamInc(camera, "PGAGain", &camera_params->pga_gain_inc);
+    if (camera_params->pga_gain >= 0) {
+        unsigned int want = (unsigned int)camera_params->pga_gain;
+        if (want >= camera_params->pga_gain_min &&
+            want <= camera_params->pga_gain_max) {
+            EVT_CameraSetUInt32Param(camera, "PGAGain", want);
+        } else {
+            printf("WARN: pga_gain %u outside camera range %u-%u, not set\n",
+                   want, camera_params->pga_gain_min,
+                   camera_params->pga_gain_max);
+        }
+    }
+    EVT_CameraGetUInt32Param(camera, "PGAGain", &current);
+    printf("PGAGain: \t\t%u (range %u-%u)\n", current,
+           camera_params->pga_gain_min, camera_params->pga_gain_max);
+}
+
 void update_color_temperature(Emergent::CEmergentCamera *camera,
                               std::string color_string,
                               CameraParams *camera_params) {
@@ -467,6 +492,7 @@ void open_camera_with_params(Emergent::CEmergentCamera *camera,
     // check_camera_errors(EVT_CameraSetUInt32Param(camera, "Gain",
     // camera_params.gain));
     update_gain_value(camera, camera_params->gain, camera_params);
+    update_pga_gain_value(camera, camera_params);
     // Before exposure/frame rate: LineTime changes their allowed ranges.
     update_line_time_value(camera, camera_params);
 

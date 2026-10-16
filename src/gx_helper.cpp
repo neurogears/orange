@@ -1,5 +1,7 @@
 
 #include "gx_helper.h"
+#include <filesystem>
+#include <fstream>
 
 void gx_glfw_error_callback(int error, const char *description) {
     fprintf(stderr, "Glfw Error %d: %s\n", error, description);
@@ -72,6 +74,18 @@ void gx_imgui_init(gx_context *context) {
 
     ImGuiIO &io = ImGui::GetIO();
     (void)io;
+    // Keep the window layout in orange_data rather than the working directory:
+    // an installed orange runs from a read-only prefix (the Nix store), and a
+    // CWD-relative imgui.ini ends up root-owned wherever orange was launched.
+    // Create the file up front and hand it to the invoking user, so ImGui's
+    // later rewrites (as root) keep it user-owned.
+    static std::string ini_path = get_orange_data_dir() + "/imgui.ini";
+    make_folder(get_orange_data_dir());
+    if (!std::filesystem::exists(ini_path)) {
+        std::ofstream(ini_path).close();
+        chown_to_invoking_user(ini_path);
+    }
+    io.IniFilename = ini_path.c_str();
     // io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable
     // Keyboard Controls io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad; //
     // Enable Gamepad Controls

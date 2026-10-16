@@ -93,10 +93,10 @@ struct CameraEachSelect {
 
 struct CameraState {
     int camera_return = 0;
-    unsigned short id_prev = 0;
-    unsigned short dropped_frames = 0;
-    unsigned int frames_recd = 0;
-    unsigned long long frame_count = 0;
+    unsigned int id_prev = 0;                // last received frame_id, for gap math
+    unsigned long long frames_received = 0;  // successful EVT_CameraGetFrame calls
+    unsigned long long frames_dropped = 0;   // missing frames inferred from id gaps
+    unsigned long long get_frame_errors = 0; // EVT_CameraGetFrame error returns
     // Frames received but not recorded because the encoder's input queue was
     // full (GPUVideoEncoder::PushToDisplay returned false).
     unsigned long long encoder_queue_full = 0;

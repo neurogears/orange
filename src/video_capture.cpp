@@ -7,6 +7,68 @@
 #include "sync_pulse_evt.h"
 #include "utils.h"
 
+// Optional per-camera "encoder" config object. Value-carrying keys map to
+// NvEncoderInitParam tokens appended to the encoder setup string; accepted
+// values are documented in NvEncoderCLIOptions.h. Tokens appended here win
+// over the global codec/preset selection made in the GUI. The codec itself
+// stays global because the container writer selects H264/HEVC from the global
+// setup string.
+static void parse_camera_encoder_config(const json &encoder_config,
+                                        CameraParams *camera_params) {
+    static const std::pair<const char *, const char *> value_keys[] = {
+        {"preset", "-preset"},
+        {"tuning", "-tuninginfo"},
+        {"rate_control", "-rc"},
+        {"multipass", "-multipass"},
+        {"profile", "-profile"},
+        {"bitrate", "-bitrate"},
+        {"max_bitrate", "-maxbitrate"},
+        {"vbv_buffer_size", "-vbvbufsize"},
+        {"cq", "-cq"},
+        {"const_qp", "-constqp"},
+        {"qmin", "-qmin"},
+        {"qmax", "-qmax"},
+        {"aq", "-aq"},
+        {"lookahead", "-lookahead"},
+        {"bframes", "-bf"},
+    };
+
+    std::string args;
+    for (const auto &key_token : value_keys) {
+        if (!encoder_config.contains(key_token.first)) {
+            continue;
+        }
+        const json &value = encoder_config[key_token.first];
+        args += std::string(" ") + key_token.second + " " +
+                (value.is_string() ? value.get<std::string>() : value.dump());
+    }
+    if (encoder_config.value("temporal_aq", false)) {
+        args += " -temporalaq";
+    }
+    if (encoder_config.contains("extra_args")) {
+        args += " " + encoder_config["extra_args"].get<std::string>();
+    }
+    camera_params->encoder_args = args;
+    camera_params->encoder_mono_chrome =
+        encoder_config.value("mono_chrome", false);
+    camera_params->encoder_mono_nv12 = encoder_config.value("mono_nv12", true);
+
+    for (auto it = encoder_config.begin(); it != encoder_config.end(); ++it) {
+        bool known = it.key() == "temporal_aq" || it.key() == "extra_args" ||
+                     it.key() == "mono_chrome" || it.key() == "mono_nv12";
+        for (const auto &key_token : value_keys) {
+            if (it.key() == key_token.first) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            std::cout << "Ignoring unknown encoder config key: " << it.key()
+                      << std::endl;
+        }
+    }
+}
+
 void load_camera_json_config_files(std::string file_name,
                                    CameraParams *camera_params,
                                    CameraEachSelect *camera_select,
@@ -52,6 +114,11 @@ void load_camera_json_config_files(std::string file_name,
     } else {
         camera_params->lens_control = false;
     }
+    if (camera_config.contains("pga_gain")) {
+        camera_params->pga_gain = camera_config["pga_gain"];
+    } else {
+        camera_params->pga_gain = -1;
+    }
     if (camera_config.contains("line_time")) {
         camera_params->line_time = camera_config["line_time"];
     } else {
@@ -63,6 +130,9 @@ void load_camera_json_config_files(std::string file_name,
     if (camera_config.contains("sync_pulse_endpoint")) {
         camera_params->sync_pulse_endpoint =
             camera_config["sync_pulse_endpoint"];
+    }
+    if (camera_config.contains("encoder")) {
+        parse_camera_encoder_config(camera_config["encoder"], camera_params);
     }
 }
 
@@ -116,16 +186,25 @@ bool set_camera_params(CameraParams *camera_params,
 
 void report_statistics(CameraParams *camera_params, CameraState *camera_state,
                        double time_diff) {
+    // Total frames the camera produced over the run is the span of frame_ids,
+    // which equals what we received plus what the id gaps tell us was missing.
+    unsigned long long total_frames =
+        camera_state->frames_received + camera_state->frames_dropped;
     std::string print_out;
     print_out += "\n" + camera_params->camera_serial;
-    print_out += ", Frame count: " + std::to_string(camera_state->frame_count);
+    print_out += ", Total frames: " + std::to_string(total_frames);
     print_out +=
-        ", Frame received: " + std::to_string(camera_state->frames_recd);
+        ", Frames received: " + std::to_string(camera_state->frames_received);
     print_out +=
-        ", Dropped Frames: " + std::to_string(camera_state->dropped_frames);
+        ", Dropped frames: " + std::to_string(camera_state->frames_dropped);
+    if (camera_state->get_frame_errors)
+        print_out += ", GetFrame errors: " +
+                     std::to_string(camera_state->get_frame_errors);
     print_out += ", Encoder queue full: " +
                  std::to_string(camera_state->encoder_queue_full);
-    float calc_frame_rate = camera_state->frames_recd / time_diff;
+    // Frame rate is computed against the camera's true output (total frames)
+    // so it reflects the rate the camera actually ran at, independent of drops.
+    float calc_frame_rate = total_frames / time_diff;
     print_out += ", Calculated Frame Rate: " + std::to_string(calc_frame_rate);
     std::cout << print_out << std::endl;
 }
@@ -236,7 +315,7 @@ inline void PTP_timestamp_checking(PTPState *ptp_state, CameraEmergent *ecam,
     // printf("camera %d, framecount %d, timestamp %f ms \n",
     // camera_params.camera_id, frame_count, frame_ts * 1e-6);
 
-    if (camera_state->frame_count != 0) {
+    if (camera_state->frames_received != 0) {
         ptp_state->ptp_time_delta =
             ptp_state->ptp_time - ptp_state->ptp_time_prev;
         ptp_state->ptp_time_delta_sum += ptp_state->ptp_time_delta;
@@ -290,25 +369,25 @@ inline void get_one_frame(CameraState *camera_state,
     gvcp_lock.unlock();
 
     if (!camera_state->camera_return) {
-        // Counting dropped frames through frame_id as redundant check.
-        if (((ecam->frame_recv.frame_id) != camera_state->id_prev + 1) &&
-            (camera_state->frame_count != 0)) {
-            camera_state->dropped_frames++;
-            camera_select->dropped_frames++;
-        } else {
-            camera_state->frames_recd++;
-            camera_select->camera_track_state->frame_count++;
-            camera_select->camera_track_state->last_progress_time.store(
-                std::chrono::steady_clock::now());
-            camera_select->capture_fps_estimator.update();
+        // Derive dropped frames from gaps in the camera's frame-id sequence
+        // rather than a manual increment, so the count reflects the true number
+        // of missing frames. The camera's id counter is 16-bit and wraps from
+        // 65535 back to 1 (GVSP has no id 0), so the modulus is 65535.
+        unsigned int id = ecam->frame_recv.frame_id;
+        if (camera_state->frames_received != 0) {
+            unsigned int delta = (id >= camera_state->id_prev)
+                                     ? (id - camera_state->id_prev)
+                                     : (id + 65535u - camera_state->id_prev);
+            if (delta > 1) {
+                camera_state->frames_dropped += (delta - 1);
+                camera_select->dropped_frames += (int)(delta - 1);
+            }
         }
-
-        // In GVSP there is no id 0 so when 16 bit id counter in camera is max
-        // then the next id is 1 so set prev id to 0 for math above.
-        if (ecam->frame_recv.frame_id == 65535)
-            camera_state->id_prev = 0;
-        else
-            camera_state->id_prev = ecam->frame_recv.frame_id;
+        camera_select->camera_track_state->frame_count++;
+        camera_select->camera_track_state->last_progress_time.store(
+            std::chrono::steady_clock::now());
+        camera_select->capture_fps_estimator.update();
+        camera_state->id_prev = id;
 
         // push the image data to encode, or display
         if (camera_control->record_video && camera_select->record) {
@@ -316,7 +395,7 @@ inline void get_one_frame(CameraState *camera_state,
                     ecam->frame_recv.imagePtr, ecam->frame_recv.bufferSize,
                     ecam->frame_recv.size_x, ecam->frame_recv.size_y,
                     ecam->frame_recv.pixel_type, ecam->frame_recv.timestamp,
-                    camera_state->frame_count, real_time, ptp_offset)) {
+                    camera_state->frames_received, real_time, ptp_offset)) {
                 camera_state->encoder_queue_full++;
             }
         }
@@ -327,7 +406,7 @@ inline void get_one_frame(CameraState *camera_state,
                 ecam->frame_recv.imagePtr, ecam->frame_recv.bufferSize,
                 ecam->frame_recv.size_x, ecam->frame_recv.size_y,
                 ecam->frame_recv.pixel_type, ecam->frame_recv.timestamp,
-                camera_state->frame_count);
+                camera_state->frames_received);
         }
 
         if (camera_select->sigs->frame_save_state.load() ==
@@ -338,9 +417,9 @@ inline void get_one_frame(CameraState *camera_state,
         // frame_id as written to Cam<serial>_meta.csv.
         if (sync_pulse)
             g_sync_pulse.OnFrame(ecam->frame_recv.timestamp,
-                                 camera_state->frame_count);
+                                 camera_state->frames_received);
 
-        camera_state->frame_count++;
+        camera_state->frames_received++;
 
         camera_state->camera_return =
             EVT_CameraQueueFrame(&ecam->camera, &ecam->frame_recv); // Re-queue.
@@ -348,20 +427,23 @@ inline void get_one_frame(CameraState *camera_state,
             std::cout << "EVT_CameraQueueFrame Error!" << std::endl;
         }
 
-        // if (camera_state->frame_count % 500 == 99) {
+        // if (camera_state->frames_received % 500 == 99) {
         //     printf("\n");
         //     fflush(stdout);
         // }
 
-        // if (camera_state->frame_count % 1000 == 99) {
+        // if (camera_state->frames_received % 1000 == 99) {
         //     // printf(".");
         //     // fflush(stdout);
         //     std::cout << camera_params->camera_name << std::endl;
         // }
-        // if (camera_state->frame_count % 20000 == 9999)
+        // if (camera_state->frames_received % 20000 == 9999)
         // printf("\n");
     } else {
-        camera_state->dropped_frames++;
+        // No frame was received, so there is no id to reason about; the loss is
+        // already captured by the gap on the next successful frame. Track these
+        // separately as a diagnostic instead of folding them into drops.
+        camera_state->get_frame_errors++;
         std::cout << "EVT_CameraGetFrame Error, " << camera_state->camera_return
                   << ", camera serial, " << camera_params->camera_serial
                   << std::endl;

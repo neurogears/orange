@@ -63,3 +63,7 @@ release/
 .vscode/
 profile/
 imgui.ini
+
+# Nix build outputs
+result
+result-*

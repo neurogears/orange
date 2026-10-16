@@ -112,6 +112,7 @@ void chown_to_invoking_user(const std::string &path, bool recursive = false);
 // executable so orange finds its assets regardless of the working directory.
 // Falls back to the path as-given (CWD-relative) if it can't be located.
 std::string resolve_asset_path(const std::string &rel);
+std::string get_orange_data_dir();
 void update_camera_configs(std::vector<std::string> &camera_config_files,
                            std::string input_folder);
 void select_cameras_have_configs(std::vector<std::string> &camera_config_files,

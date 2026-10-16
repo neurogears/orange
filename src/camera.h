@@ -20,6 +20,7 @@ struct CameraParams {
     unsigned int frame_rate;
     unsigned int gop; // in seconds
     unsigned int gain;
+    int pga_gain = -1; // PGAGain; -1 = leave the camera's current value
     unsigned int exposure;
     unsigned int iris;
     unsigned int focus;
@@ -41,6 +42,9 @@ struct CameraParams {
     unsigned int gain_max;
     unsigned int gain_min;
     unsigned int gain_inc;
+    unsigned int pga_gain_max;
+    unsigned int pga_gain_min;
+    unsigned int pga_gain_inc;
     unsigned int exposure_max;
     unsigned int exposure_min;
     unsigned int exposure_inc;
@@ -71,6 +75,16 @@ struct CameraParams {
     int sens_temp;
     int sens_temp_max;
     int sens_temp_min;
+    // Extra NVENC options appended to the encoder setup string, built from the
+    // optional per-camera "encoder" config object (see NvEncoderCLIOptions.h
+    // for the accepted tokens and values).
+    std::string encoder_args;
+    // Sets NV_ENC_CONFIG::monoChromeEncoding when enabled via config.
+    bool encoder_mono_chrome = false;
+    // Mono cameras feed the raw frame directly to NVENC as the NV12 luma plane
+    // (chroma pre-filled once) instead of expanding to RGBA. Disable via
+    // config to restore the RGBA input path.
+    bool encoder_mono_nv12 = true;
     CameraParams() : frame_rate(60), gop(1) {}
 };
 
@@ -159,6 +173,8 @@ void update_color_temperature(Emergent::CEmergentCamera *camera,
                               CameraParams *camera_params);
 void update_gain_value(Emergent::CEmergentCamera *camera, int gain_val,
                        CameraParams *camera_params);
+void update_pga_gain_value(Emergent::CEmergentCamera *camera,
+                           CameraParams *camera_params);
 void update_line_time_value(Emergent::CEmergentCamera *camera,
                             CameraParams *camera_params);
 void update_exposure_value(Emergent::CEmergentCamera *camera, int exposure_val,

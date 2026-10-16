@@ -55,6 +55,9 @@ std::string get_home_directory() {
 #endif
 }
 
+// Per-user data root: presets, logs, imgui.ini and (by default) recordings.
+std::string get_orange_data_dir() { return get_home_directory() + "/orange_data"; }
+
 void chown_to_invoking_user(const std::string &path, bool recursive) {
 #ifndef _WIN32
     // orange runs under sudo, so anything it creates is owned by root. Hand it
@@ -217,7 +220,7 @@ void prepare_application_folders(std::string &orange_root_dir,
     }
 
     if (orange_root_dir.empty()) {
-        orange_root_dir = home_dir + "/orange_data";
+        orange_root_dir = get_orange_data_dir();
     }
     std::vector<std::string> app_folders = {"config/local", "pictures"};
     create_required_folders(orange_root_dir, app_folders);

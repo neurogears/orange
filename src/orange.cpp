@@ -109,6 +109,11 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char **args) {
+    // Line-buffer stdout: under the launcher it is a pipe into the per-run log
+    // (orange_data/logs), and block buffering would hold back (or, on a crash,
+    // lose) the last few KB of output.
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     // Command line. Everything here can also be set in the GUI; the options
     // exist so a recording (e.g. a chunking soak test) can run unattended.
     std::string cli_preset;
@@ -198,7 +203,12 @@ int main(int argc, char **args) {
     CameraControl *camera_control =
         new CameraControl{false, false, false, false, false};
 
-    int evt_buffer_size{100};
+    // One second of buffering at 60 fps, matching the vendor tools'
+    // default.  With gpu_direct each buffer is a full frame resident on the
+    // DMA-target GPU (60 x 20.4 MB at 4512x4512 Mono8, ~1.2 GiB per
+    // camera), so deeper queues cost GPU memory on dies shared by several
+    // cameras.
+    int evt_buffer_size{60};
     PTPParams *ptp_params =
         new PTPParams{0, 0, 0, 0, false, false, false, false};
 
@@ -807,7 +817,7 @@ int main(int argc, char **args) {
                             }
                         }
 
-                        ecams = new CameraEmergent[num_cameras];
+                        ecams = new CameraEmergent[num_cameras]();
                         for (int i = 0; i < num_cameras; i++) {
                             if (!skip_setting_params[i]) {
                                 open_camera_with_params(

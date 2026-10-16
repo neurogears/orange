@@ -35,15 +35,17 @@ done
 
 BINDIR="$PREFIX/bin"
 APPDIR="$PREFIX/opt/$APP_NAME"
-DESKTOP_FILE="$HOME/.local/share/applications/$APP_NAME.desktop"
-ICON_BASE="$HOME/.local/share/icons/hicolor"
-ICON_256="$ICON_BASE/256x256/apps/$APP_NAME.png"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_FILE="$DATA_HOME/applications/$APP_NAME.desktop"
+ICON_BASE="$DATA_HOME/icons/hicolor"
+ICON_512="$ICON_BASE/512x512/apps/$APP_NAME.png"
 
+# ~/orange_data (presets, logs, recordings) is never touched.
 targets=(
   "$APPDIR"
   "$BINDIR/$APP_NAME"
   "$DESKTOP_FILE"
-  "$ICON_256"
+  "$ICON_512"
 )
 
 echo "[*] Uninstalling $APP_NAME from prefix: $PREFIX"
@@ -74,7 +76,7 @@ done
 # Refresh caches (if not dry-run and tools present)
 if [[ $DRYRUN -eq 0 ]]; then
   command -v update-desktop-database >/dev/null 2>&1 && \
-    update-desktop-database "$HOME/.local/share/applications" || true
+    update-desktop-database "$DATA_HOME/applications" || true
 
   command -v gtk-update-icon-cache >/dev/null 2>&1 && \
     gtk-update-icon-cache -f "$ICON_BASE" || true

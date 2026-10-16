@@ -86,7 +86,9 @@ showed up only as `frame_id` gaps.
 
 - GUI: tick **Chunk recording**, set **Chunk minutes** (≥ 0.1), press record.
 - Command line (unattended):
-  `sudo -E release/orange --preset <name> --chunk-seconds 1800 --record-seconds <N> [--record-dir DIR]`.
+  `orange --preset <name> --chunk-seconds 1800 --record-seconds <N> [--record-dir DIR]`
+  (`./run.sh` with the same arguments for a development build). The run's
+  console output is in `~/orange_data/logs/orange_latest.log`.
   With `--record-seconds`, orange opens every camera with that preset,
   records for N s (measured from the PTP gate), stops and exits.
   `--preset` and `--chunk-seconds` alone just preselect them in the GUI.

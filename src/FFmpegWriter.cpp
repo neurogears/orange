@@ -8,20 +8,10 @@ FFmpegWriter::FFmpegWriter(AVCodecID eCodecId, int nWidth, int nHeight,
                            int nFps, const char *szOutFilePath,
                            const char *metadata_file)
     : nFps(nFps) {
-    oc = avformat_alloc_context();
-    if (!oc) {
-        printf("FFMPEG: avformat_alloc_context error");
+    if (avformat_alloc_output_context2(&oc, NULL, "mp4", NULL) < 0) {
+        printf("FFMPEG: avformat_alloc_output_context2 error");
         return;
     }
-
-    // Set format on oc
-    AVOutputFormat *fmt = av_guess_format("mp4", NULL, NULL);
-    if (!fmt) {
-        printf("Invalid format");
-        return;
-    }
-    fmt->video_codec = eCodecId;
-    oc->oformat = fmt;
 
     // Add video stream to oc
     vs = avformat_new_stream(oc, NULL);
@@ -33,7 +23,7 @@ FFmpegWriter::FFmpegWriter(AVCodecID eCodecId, int nWidth, int nHeight,
 
     // Set video parameters
     AVCodecParameters *vpar = vs->codecpar;
-    vpar->codec_id = fmt->video_codec;
+    vpar->codec_id = eCodecId;
     vpar->codec_type = AVMEDIA_TYPE_VIDEO;
     vpar->width = nWidth;
     vpar->height = nHeight;

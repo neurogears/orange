@@ -24,8 +24,48 @@ Linux-only. Requires an NVIDIA GPU with NVENC. See the docs for full system requ
 git clone --recursive https://github.com/moments-behavior/orange.git
 cd orange
 ./build.sh    # builds release/orange
-./run.sh      # sudo release/orange
+./run.sh      # runs it (sudo), logging to ~/orange_data/logs
 ```
+
+## Install
+
+Either install route gives an `orange` command and an "Orange" entry in the desktop's applications. Both start orange through the same launcher (`packaging/orange-launcher.sh`), which elevates with sudo (asking for the password in a dialog when there is no terminal) and logs each run.
+
+- **Nix** (recommended on the rig): `nix profile install --impure .#orange-with-nixgl`. See [NIX.md](NIX.md).
+- **CMake build**: `./build.sh && ./install.sh` installs into `~/.local` (`./uninstall.sh` removes it).
+
+```bash
+orange                                     # GUI
+orange --preset <config/local folder> --chunk-seconds 1800 \
+       --record-seconds 259200 --record-dir /mnt/data/exp/unsorted
+orange --help
+```
+
+Each run writes `~/orange_data/logs/orange_<date>_<time>.log` (header with version, command line and driver; every line of output, timestamped; exit status). `~/orange_data/logs/orange_latest.log` links to the newest one.
+
+## Camera presets
+
+Presets are folders under `~/orange_data/config/local/<preset>/`, one `<serial>.json` per camera. Besides the basic keys (`width`, `height`, `frame_rate`, `gain`, `exposure`, `gpu_id`, `gpu_direct`, ...), optional keys are:
+
+| Key | Meaning |
+|---|---|
+| `pga_gain` | sensor PGA gain (`PGAGain`); left as is when absent |
+| `line_time` | sensor line time in ns (`LineTime`); left as is when absent |
+| `offsetx`, `offsety`, `lens_control`, `gop` | ROI offset, EF/RF lens init, GOP length in s |
+| `sync_pulse_gpo`, `sync_pulse_endpoint` | ZeroMQ sync pulses, see below |
+| `encoder` | per-camera NVENC settings, below |
+
+`encoder` overrides the GUI's preset for that camera and adds rate control options. The codec stays global (GUI or `~/.config/orange/config.json`). For example:
+
+```json
+"encoder": {
+    "preset": "p1", "tuning": "hq", "rate_control": "vbr", "multipass": "disabled",
+    "bitrate": "150M", "max_bitrate": "200M", "bframes": 0, "lookahead": 0,
+    "mono_chrome": true
+}
+```
+
+Accepted keys: `preset`, `tuning`, `rate_control`, `multipass`, `profile`, `bitrate`, `max_bitrate`, `vbv_buffer_size`, `cq`, `const_qp`, `qmin`, `qmax`, `aq`, `lookahead`, `bframes`, `temporal_aq` (bool), `extra_args` (raw NVENC CLI tokens), `mono_chrome` (bool, monochrome encoding) and `mono_nv12` (bool, default true: mono cameras feed the raw frame to NVENC as the NV12 luma plane instead of expanding it to RGBA). Values are as in `src/NvEncoder/NvEncoderCLIOptions.h`.
 
 ## Chunked recording
 
@@ -41,9 +81,11 @@ Each chunk folder is laid out like an ordinary single-file recording. `frame_id`
 Unattended runs from the command line:
 
 ```bash
-sudo -E release/orange --preset <config/local folder> --chunk-seconds 1800 \
+orange --preset <config/local folder> --chunk-seconds 1800 \
     --record-seconds 259200 --record-dir /mnt/data/exp/unsorted
 ```
+
+(`./run.sh` takes the same arguments for a development build.)
 
 ## Sync pulses on request (ZeroMQ)
 

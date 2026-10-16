@@ -1,0 +1,26 @@
+{
+    "name": "19",
+    "width": 4512,
+    "height": 4512,
+    "frame_rate": 60,
+    "gain": 256,
+    "pga_gain": 0,
+    "focus": 267,
+    "iris": 10,
+    "exposure": 3000,
+    "pixel_format": "Mono8",
+    "gpu_id": 1,
+    "color_temp": "CT_2800K",
+    "gpu_direct": true,
+    "color": false,
+    "line_time": 1402,
+    "gop": 1,
+    "encoder": {
+        "tuning": "hq",
+        "rate_control": "vbr",
+        "bitrate": "150M",
+        "max_bitrate": "200M",
+        "bframes": 0,
+        "mono_nv12": true
+    }
+}

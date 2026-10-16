@@ -1,93 +1,56 @@
 #!/usr/bin/env bash
+# Install a CMake build (release/orange, from ./build.sh) for the current user:
+# the `orange` command plus an "Orange" entry in the desktop's applications.
+# For the Nix package, see NIX.md instead.
+#
+# Usage: ./install.sh [PREFIX]      (default PREFIX: ~/.local)
 set -euo pipefail
 
 APP_NAME="orange"
-
-# --- Locations (run this script from your project root) ---
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$SRC_DIR/release/$APP_NAME"
-FONTS_SRC="$SRC_DIR/fonts"
-ICON_SRC="$SRC_DIR/icon.png"
 
-# Optional prefix (default to ~/.local)
 PREFIX="${1:-"$HOME/.local"}"
-
-# Install targets
 BINDIR="$PREFIX/bin"
-APPDIR="$PREFIX/opt/$APP_NAME"                 # app bundle dir (binary + fonts + icon)
-DESKTOP_DIR="$HOME/.local/share/applications"  # user desktop entries
+APPDIR="$PREFIX/opt/$APP_NAME" # binary + fonts + helpers
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+DESKTOP_DIR="$DATA_HOME/applications"
+ICON_DIR="$DATA_HOME/icons/hicolor/512x512/apps"
 
 echo "[*] Installing $APP_NAME into: $PREFIX"
-echo "    - Binary:  $BIN_SRC"
-echo "    - Fonts:   $FONTS_SRC (if exists)"
-echo "    - Icon:    $ICON_SRC  (if exists)"
 
-# --- Sanity checks ---
 if [[ ! -f "$BIN_SRC" ]]; then
-  echo "ERROR: $BIN_SRC not found. Build your app or check the path." >&2
-  exit 1
+    echo "ERROR: $BIN_SRC not found. Run ./build.sh first." >&2
+    exit 1
 fi
 
-mkdir -p "$APPDIR" "$BINDIR" "$DESKTOP_DIR"
+mkdir -p "$APPDIR" "$BINDIR" "$DESKTOP_DIR" "$ICON_DIR"
 
-# --- Copy binary into appdir (not directly into bin to keep fonts nearby) ---
+# App dir: binary, fonts (found next to the executable), sudo askpass helper
 install -m 755 "$BIN_SRC" "$APPDIR/$APP_NAME"
+rm -rf "$APPDIR/fonts"
+cp -a "$SRC_DIR/fonts" "$APPDIR/fonts"
+install -m 755 "$SRC_DIR/packaging/orange-askpass.sh" "$APPDIR/orange-askpass"
+git -C "$SRC_DIR" describe --always --dirty >"$APPDIR/VERSION" 2>/dev/null ||
+    echo unknown >"$APPDIR/VERSION"
 
-# --- Copy fonts (if present) ---
-if [[ -d "$FONTS_SRC" ]]; then
-  mkdir -p "$APPDIR/fonts"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "$FONTS_SRC"/ "$APPDIR/fonts"/
-  else
-    # -a preserves perms; '/.' copies contents not the dir itself
-    cp -a "$FONTS_SRC"/. "$APPDIR/fonts"/
-  fi
-else
-  echo "WARN: fonts/ not found; continuing without it."
-fi
+# Launcher: per-run log in ~/orange_data/logs, sudo, runs from the app dir
+install -m 755 "$SRC_DIR/packaging/orange-launcher.sh" "$BINDIR/$APP_NAME"
 
-# --- Install icon into appdir and reference it by absolute path in .desktop ---
-if [[ -f "$ICON_SRC" ]]; then
-  cp -f "$ICON_SRC" "$APPDIR/icon.png"
-else
-  echo "WARN: icon.png not found; launcher will have a generic icon."
-fi
-
-# --- Wrapper in ~/.local/bin so the app runs from its own dir (finds fonts/) ---
-WRAPPER="$BINDIR/$APP_NAME"
-cat > "$WRAPPER" <<EOF
-#!/usr/bin/env bash
-APPDIR="$APPDIR"
-cd "\$APPDIR"
-exec "\$APPDIR/$APP_NAME" "\$@"
-EOF
-chmod +x "$WRAPPER"
-
-# --- Desktop entry (launcher) ---
-DESKTOP_FILE="$DESKTOP_DIR/$APP_NAME.desktop"
-ICON_PATH="$APPDIR/$APP_NAME.png"   # absolute path avoids theme cache issues
-
-cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Orange
-Comment=Orange Application
-TryExec=$BINDIR/$APP_NAME
-Exec=$BINDIR/$APP_NAME %F
-Icon=$ICON_PATH
-Terminal=false
-Categories=Graphics;Utility;
-# Uncomment if you set your window class to "orange" (helps dock show the right icon)
-# StartupWMClass=orange
-EOF
-
-# --- Refresh desktop database (icon cache not needed for absolute icon path) ---
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database "$DESKTOP_DIR" || true
-fi
+# Desktop entry and icon
+install -m 644 "$SRC_DIR/icon.png" "$ICON_DIR/$APP_NAME.png"
+sed "s|@bindir@|$BINDIR|g" "$SRC_DIR/packaging/orange.desktop" \
+    >"$DESKTOP_DIR/$APP_NAME.desktop"
+command -v update-desktop-database >/dev/null 2>&1 &&
+    update-desktop-database "$DESKTOP_DIR" || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+    gtk-update-icon-cache -q -t "$DATA_HOME/icons/hicolor" || true
 
 echo
 echo "✔ Install complete."
-echo "➤ Run: $APP_NAME"
-echo "   (Make sure '$BINDIR' is in your PATH. If not, add this to your shell rc:)"
-echo "     export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo "➤ Run: $APP_NAME   (or open \"Orange\" from the applications menu)"
+echo "   Logs: ~/orange_data/logs/orange_<date>_<time>.log"
+case ":$PATH:" in
+*":$BINDIR:"*) ;;
+*) echo "   Note: $BINDIR is not in PATH; add: export PATH=\"$BINDIR:\$PATH\"" ;;
+esac

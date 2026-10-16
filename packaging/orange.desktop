@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Orange
+GenericName=Multi-camera recorder
+Comment=Record synchronized video from Emergent cameras
+Exec=@bindir@/orange
+TryExec=@bindir@/orange
+Icon=orange
+Terminal=false
+Categories=AudioVideo;Video;Recorder;Science;
+Keywords=camera;recording;video;PTP;
+StartupWMClass=Orange

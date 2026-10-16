@@ -83,6 +83,13 @@ public:
     */
     void SetIOCudaStreams(NV_ENC_CUSTREAM_PTR inputStream, NV_ENC_CUSTREAM_PTR outputStream);
 
+    /**
+    *  @brief Fill the chroma planes of every input surface in the ring with a
+    *  constant value. With a neutral value (0x80) monochrome sources can skip
+    *  per-frame chroma writes entirely and copy only the luma plane.
+    */
+    void FillInputFrameChromaPlanes(uint8_t value);
+
 protected:
     /**
     *  @brief This function is used to release the input buffers allocated for encoding.
